@@ -1,34 +1,23 @@
-Option :: type -> type;
-Option x = [Some x, None];
+inc :: u32 -> u32;
+inc x = x.add(3).sub(2);
 
-unwrap :: Option('a) -> 'a;
+Option :: [Some u32, None];
+
+unwrap :: Option -> u32;
 unwrap Some x = x;
-unwrap None = unreachable;
+unwrap None x = unreachable;
 
-map :: {Option('a), 'a -> 'b} -> Option('b);
-map {Some x, f} = Some f(x);
-map {None, _} = None {};
+add :: {u32, u32} -> u32;
+add x = x.0.add(x.1);
 
-Slice :: type -> type;
-Slice x = {len usize, data Ptr(x)};
+Slice :: {len usize, data u8};
+get :: {Slice, usize} -> u8;
+get {slice, index} = slice.data.add(index); 
 
-get_unsafe :: {Slice('a), usize} -> 'a;
-get_unsafe {slice, index} = slice.data.add(index.mul('a.size));
-get :: {Slice('a), usize} -> Option('a);
-get {slice, index} = if(index.lt(slice.len), {slice, index}, |x| Some get_unsafe(x), |_| None);
-
-Vec2 :: type -> type;
-Vec2 x = {x, x};
-
-add :: {Vec2('_), Vec2('_)} -> Vec2('_);
-add {a, b} = {a.0.add(b.0), a.1.add(b.1)};
-
-main :: {} -> {} = {
-	a :: Vec2 = {0, 1};
-	b :: Vec2 = {2, 3};
-	c :: Vec2 = a.add(b); // {2, 4}
-};
-
-if :: {bool, 'a, 'a -> 'b, 'a -> 'b} -> 'b;
-if {true, data, then, _} = then(data);
-if {false, data, _, else} = else(data);
+main :: {} -> {};
+main a = {
+    x :: u32 = 0;
+    y :: u32 = 1;
+    z :: u32 = x.add(y);
+    z
+}; 

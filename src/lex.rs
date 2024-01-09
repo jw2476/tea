@@ -11,6 +11,7 @@ pub enum Token {
     Comma,
     Dot,
     Arrow,
+    WideArrow,
     Backslash,
 
     LeftRound,
@@ -36,7 +37,14 @@ pub fn tokenize(text: &str) -> Vec<Token> {
         let token = match c {
             '*' => Token::Star,
             '_' => Token::Underscore,
-            '=' => Token::Equals,
+            '=' => {
+                if *chars.peek().unwrap() == '>' {
+                    chars.next();
+                    Token::WideArrow
+                } else {
+                    Token::Equals
+                }
+            }
             ';' => Token::Semicolon,
             ':' => {
                 if *chars.peek().unwrap() == ':' {
