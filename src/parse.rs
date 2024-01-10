@@ -39,6 +39,7 @@ pub enum ErrorKind {
     MissingKeyword(String),
     MissingWideArrow,
     MissingDot,
+    MissingColon,
 }
 
 pub struct Error {
@@ -129,7 +130,8 @@ pub struct Expr {
 pub enum ScopeKind {
     Module,
     Block(Expr),
-    IncompleteBlock,
+    Arm(Pattern, Expr),
+    Incomplete,
 }
 
 #[derive(Debug)]
@@ -227,20 +229,21 @@ impl Context {
         self.scopes.push(scope);
         self.scopes.len() - 1
     }
+
+    pub fn get_unit(&self) -> Option<TypeId> {
+        let ty = Type::Product(Product { fields: Vec::new() });
+        self.types.iter().position(|t| t == &ty)
+    }
 }
 
 #[derive(Clone)]
 pub struct Input<'a> {
-    ctx: Rc<RefCell<Context>>,
-    scope: ScopeId,
     tokens: &'a [Token],
 }
 
 impl<'a> Input<'a> {
     pub fn slice(self, range: RangeFrom<usize>) -> Self {
         Self {
-            ctx: self.ctx,
-            scope: self.scope,
             tokens: &self.tokens[range],
         }
     }
@@ -312,6 +315,7 @@ tok_parser!(equals, Token::Equals, MissingEquals);
 tok_parser!(pipe, Token::Pipe, MissingPipe);
 tok_parser!(wide_arrow, Token::WideArrow, MissingWideArrow);
 tok_parser!(dot, Token::Dot, MissingDot);
+tok_parser!(colon, Token::Colon, MissingColon);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Path {
@@ -540,7 +544,7 @@ fn pattern(input: Input) -> Parsed<Pattern> {
 #[derive(Debug)]
 pub struct Match {
     pub expr: Box<Expr>,
-    pub branches: Vec<(Pattern, Expr)>,
+    pub branches: Vec<ScopeId>,
 }
 
 fn keyword<T: ToString>(word: T) -> impl Fn(Input) -> Parsed<()> {
@@ -582,7 +586,7 @@ pub struct Block {
 
 fn block(mut input: Input) -> Parsed<ScopeId> {
     let scope = input.ctx.borrow_mut().add_scope(Scope {
-        kind: ScopeKind::IncompleteBlock,
+        kind: ScopeKind::Incomplete,
         types: HashMap::new(),
         values: HashMap::new(),
         parent: Some(input.scope),
@@ -693,7 +697,7 @@ fn vdecl(input: Input) -> Parsed<()> {
 
 fn combined(input: Input) -> Parsed<()> {
     let (input, (ty, value)) = ident
-        .and(double_colon)
+        .and(colon)
         .and(ty)
         .and(equals)
         .and(expr)

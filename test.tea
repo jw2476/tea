@@ -1,23 +1,12 @@
 inc :: u32 -> u32;
 inc x = x.add(3).sub(2);
 
-Option :: [Some u32, None];
-
-unwrap :: Option -> u32;
-unwrap Some x = x;
-unwrap None x = unreachable;
-
 add :: {u32, u32} -> u32;
-add x = x.0.add(x.1);
-
-Slice :: {len usize, data u8};
-get :: {Slice, usize} -> u8;
-get {slice, index} = slice.data.add(index); 
 
 main :: {} -> {};
-main a = {
-    x :: u32 = 0;
-    y :: u32 = 1;
-    z :: u32 = x.add(y);
+main = || {
+    x: u32 = 0;
+    y: u32 = 1;
+    z: u32 = x.add(y);
     z
 }; 

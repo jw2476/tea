@@ -1,7 +1,7 @@
 use lex::tokenize;
 use parse::parse_tokens;
 
-use crate::ir::prune_incomplete_blocks;
+use crate::ir::{infer, prune_incomplete_blocks};
 
 mod ir;
 mod lex;
@@ -12,5 +12,6 @@ fn main() {
     let tokens = tokenize(&file);
     let mut ctx = parse_tokens(&tokens).unwrap();
     prune_incomplete_blocks(&mut ctx);
+    infer(&mut ctx);
     println!("{ctx:#?}");
 }
