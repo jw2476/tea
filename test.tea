@@ -1,12 +1,14 @@
-inc :: u32 -> u32;
-inc x = x.add(3).sub(2);
+a: type = u32;
+Option: Option(u32) = 0;
+unwrap: Option('a) -> 'a = opt -> match opt {
+	Some(x) -> x,
+	None(_) -> unreachable
+};
 
-add :: {u32, u32} -> u32;
+map: {Option('a), 'a -> 'b} -> Option('b) = x -> match x {
+	{Some(x), f} -> Some(f(x)),
+	{None(_), _} -> None()
+};
 
-main :: {} -> {};
-main = || {
-    x: u32 = 0;
-    y: u32 = 1;
-    z: u32 = x.add(y);
-    z
-}; 
+Vec2: type = {u32, u32};
+add: {Vec2, Vec2} -> Vec2 = {x, y} -> {add(x.0, y.0), add(x.1, y.1)};
