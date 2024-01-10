@@ -173,9 +173,9 @@ fn path(input: Input) -> Parsed<Path> {
 
 pub type NodeId = usize;
 #[derive(Clone, Debug)]
-pub struct Sum(Vec<(String, NodeId)>);
+pub struct Sum(pub Vec<(String, NodeId)>);
 #[derive(Clone, Debug)]
-pub struct Product(Vec<(String, NodeId)>);
+pub struct Product(pub Vec<(String, NodeId)>);
 pub type Call = (String, NodeId);
 pub type Function = (NodeId, NodeId);
 pub type Match = (NodeId, Vec<NodeId>);
@@ -199,14 +199,14 @@ pub enum Node {
 
 #[derive(Clone, Debug)]
 pub struct Decl {
-    ident: String,
-    ty: NodeId,
-    value: NodeId,
+    pub ident: String,
+    pub ty: NodeId,
+    pub value: NodeId,
 }
 
 #[derive(Clone, Debug)]
 pub struct Context {
-    nodes: Vec<Node>,
+    pub nodes: Vec<Node>,
 }
 
 impl Context {
