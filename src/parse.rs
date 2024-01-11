@@ -187,6 +187,7 @@ pub enum Node {
     Product(Product),
     Call(Call),
     Function(Function),
+    Lambda(Function),
     Match(Match),
     Access(Access),
     Type,
@@ -288,6 +289,13 @@ fn function(input: Input) -> Parsed<Function> {
         .parse(input)
 }
 
+fn lambda(input: Input) -> Parsed<Function> {
+    arg.and(wide_arrow)
+        .and(expr)
+        .map(|((x, _), y)| (x, y))
+        .parse(input)
+}
+
 fn keyword<T: ToString>(word: T) -> impl Fn(Input) -> Parsed<()> {
     move |input| match input.tokens.first() {
         Some(Token::Identifier(w)) if w == &word.to_string() => Ok((input.slice(1..), ())),
@@ -362,6 +370,7 @@ fn base(input: Input) -> Parsed<NodeId> {
 fn expr(input: Input) -> Parsed<NodeId> {
     let (mut input, expr) = alt((
         function.map(Node::Function),
+        lambda.map(Node::Lambda),
         sum.map(Node::Sum),
         product.map(Node::Product),
         call.map(Node::Call),

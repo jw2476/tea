@@ -1,8 +1,11 @@
 a: type = u32;
-unwrap: Option('a) = 0;
-// unwrap: Option('a) -> 'a = opt -> match opt {
-// 	Some(x) -> x,
-//	None(_) -> unreachable
+Option: type -> type = x => [Some x, None {}];
+unwrap: Option(u32) = 0;
+add: {u32, u32} -> u32 = {};
+inc: u32 -> u32 = x => add(x, 1);
+// unwrap: Option('a) -> 'a = opt => match opt {
+// 	Some(x) => x,
+//	None(_) => unreachable
 // };
 
 // Vec2: type = {u32, u32};

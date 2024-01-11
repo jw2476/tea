@@ -1,8 +1,8 @@
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
 
-use crate::parse::{Context, Decl, Node, NodeId};
+use crate::parse::{Context, Decl, Node, NodeId, Product, Sum};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstId {
     Type,
     Unreachable,
@@ -18,13 +18,14 @@ pub enum InstId {
     Isize,
     F32,
     F64,
-    Other(usize),
+    Unresolved(String),
+    Resolved(usize),
 }
 
 impl InstId {
-    fn to_index(self) -> Option<usize> {
+    fn to_index(&self) -> Option<usize> {
         match self {
-            Self::Other(x) => Some(x),
+            Self::Resolved(x) => Some(*x),
             _ => None,
         }
     }
@@ -50,24 +51,10 @@ impl Display for InstId {
                 Self::Isize => "isize".to_string(),
                 Self::F32 => "f32".to_string(),
                 Self::F64 => "f64".to_string(),
-                Self::Other(id) => format!("%{}", id),
+                Self::Unresolved(id) => format!("%{}", id),
+                Self::Resolved(id) => format!("%{}", id),
             }
         )
-    }
-}
-
-#[derive(Debug)]
-pub enum Identifier {
-    Unresolved(String),
-    Resolved(InstId),
-}
-
-impl Display for Identifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unresolved(x) => write!(f, "{x}"),
-            Self::Resolved(x) => write!(f, "{x}"),
-        }
     }
 }
 
@@ -81,7 +68,7 @@ pub enum Inst {
     Product(Vec<InstId>),
     Sum(Vec<InstId>),
     Hole(Option<String>),
-    Call { func: Identifier, arg: InstId },
+    Call { func: InstId, arg: InstId },
     Match { variant: usize, val: InstId },
     Try(Vec<InstId>),
     Unreachable,
@@ -99,6 +86,7 @@ pub struct Block {
     kind: BlockKind,
     insts: Vec<InstId>,
     parent: Option<BlockId>,
+    labels: HashMap<String, InstId>,
 }
 
 #[derive(Default, Debug)]
@@ -116,13 +104,23 @@ impl IR {
 
     pub fn add_inst(&mut self, inst: Inst) -> InstId {
         self.insts.push(inst);
-        let id = InstId::Other(self.insts.len() - 1);
-        self.blocks[self.curr].insts.push(id);
+        let id = InstId::Resolved(self.insts.len() - 1);
+        self.blocks[self.curr].insts.push(id.clone());
         id
     }
 
-    pub fn next_id(&self) -> InstId {
-        InstId::Other(self.insts.len())
+    pub fn add_label(&mut self, inst: InstId, label: String) {
+        self.blocks[self.curr].labels.insert(label, inst);
+    }
+
+    fn lookup(&self, block: &Block, label: &str) -> Option<InstId> {
+        match block.labels.get(label) {
+            Some(x) => Some(x.clone()),
+            None => match block.parent {
+                Some(parent) => self.lookup(&self.blocks[parent], label),
+                None => None,
+            },
+        }
     }
 
     fn display_inst(&self, inst: &Inst) -> String {
@@ -132,7 +130,30 @@ impl IR {
             Inst::Int(x) => format!("INT {x}"),
             Inst::Call { func, arg } => format!("CALL {func} {arg}"),
             Inst::Hole(ident) => format!("HOLE {}", ident.clone().unwrap_or_default()),
-            _ => todo!(),
+            Inst::Fn { arg, ret } => {
+                format!("FN {arg} {ret}")
+            }
+            Inst::Arg => "ARG".to_string(),
+            Inst::Product(fields) => format!(
+                "PRODUCT {}",
+                fields
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            ),
+            Inst::Sum(variants) => format!(
+                "SUM {}",
+                variants
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            ),
+            _ => {
+                println!("{inst:?}");
+                todo!()
+            }
         }
     }
 
@@ -142,13 +163,17 @@ impl IR {
             block
                 .insts
                 .iter()
-                .map(|inst| format!(
-                    "{inst} = {}",
-                    self.display_inst(&self.insts[inst.to_index().unwrap()])
-                ))
+                .map(|inst| {
+                    let label = block.labels.iter().find(|(_, i)| *i == inst);
+                    format!(
+                        "{}{inst} = {}",
+                        label.map(|(x, _)| format!("{x}: ")).unwrap_or_default(),
+                        self.display_inst(&self.insts[inst.to_index().unwrap()])
+                    )
+                })
                 .collect::<Vec<String>>()
                 .join("\n")
-                .split("\n")
+                .split('\n')
                 .map(|x| format!("  {x}"))
                 .collect::<Vec<String>>()
                 .join("\n")
@@ -163,21 +188,121 @@ impl IR {
             .collect::<Vec<String>>()
             .join("\n")
     }
+
+    fn get_block(&self, id: usize) -> &Block {
+        self.blocks
+            .iter()
+            .find(|block| {
+                block
+                    .insts
+                    .iter()
+                    .find(|inst| inst == &&InstId::Resolved(id))
+                    .is_some()
+            })
+            .unwrap()
+    }
+
+    fn _resolve(&self, id: &InstId, base: usize) -> InstId {
+        match id {
+            InstId::Unresolved(x) => self
+                .lookup(self.get_block(base), x)
+                .expect(&format!("Failed to resolve {x}")),
+            x => x.clone(),
+        }
+    }
+
+    fn resolve(&mut self) {
+        self.insts = self
+            .insts
+            .iter()
+            .enumerate()
+            .map(|(i, inst)| match inst {
+                Inst::As { ty, val } => Inst::As {
+                    ty: self._resolve(ty, i),
+                    val: self._resolve(val, i),
+                },
+                Inst::Block(block) => Inst::Block(*block),
+                Inst::Fn { arg, ret } => Inst::Fn {
+                    arg: self._resolve(arg, i),
+                    ret: self._resolve(ret, i),
+                },
+                Inst::Arg => Inst::Arg,
+                Inst::Product(fields) => {
+                    Inst::Product(fields.iter().map(|field| self._resolve(field, i)).collect())
+                }
+                Inst::Sum(variants) => Inst::Sum(
+                    variants
+                        .iter()
+                        .map(|variant| self._resolve(variant, i))
+                        .collect(),
+                ),
+                Inst::Hole(_) => todo!(),
+                Inst::Call { func, arg } => Inst::Call {
+                    func: self._resolve(func, i),
+                    arg: self._resolve(arg, i),
+                },
+                Inst::Match { variant, val } => todo!(),
+                Inst::Try(branches) => {
+                    Inst::Try(branches.iter().map(|x| self._resolve(x, i)).collect())
+                }
+                Inst::Unreachable => Inst::Unreachable,
+                Inst::Int(x) => Inst::Int(x.clone()),
+            })
+            .collect::<Vec<Inst>>()
+    }
 }
 
 fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> InstId {
+    println!("{:?}", ctx.nodes[id]);
     match &ctx.nodes[id] {
         Node::Type => InstId::Type,
         Node::Var(Some(x)) => match x.as_str() {
             "u32" => InstId::U32,
-            _ => todo!(),
+            _ => InstId::Unresolved(x.clone()),
         },
         Node::Call((func, arg)) => {
             let arg = node(ir, ctx, *arg);
             ir.add_inst(Inst::Call {
-                func: Identifier::Unresolved(func.clone()),
+                func: InstId::Unresolved(func.clone()),
                 arg,
             })
+        }
+        Node::Lambda((arg, body)) => {
+            let Node::Var(x) = ctx.nodes[*arg].clone() else {
+                todo!()
+            };
+            let block = ir.add_block(Block {
+                kind: BlockKind::Func,
+                insts: Vec::new(),
+                parent: Some(ir.curr),
+                labels: HashMap::new(),
+            });
+            ir.curr = block;
+            let arg = ir.add_inst(Inst::Arg);
+            ir.add_label(arg, x.unwrap());
+            node(ir, ctx, *body);
+
+            ir.curr = ir.blocks[ir.curr].parent.unwrap();
+            ir.add_inst(Inst::Block(block))
+        }
+        Node::Function((arg, ret)) => {
+            let arg = node(ir, ctx, *arg);
+            let ret = node(ir, ctx, *ret);
+            ir.add_inst(Inst::Fn { arg, ret })
+        }
+        Node::Product(Product(fields)) => {
+            let fields = fields
+                .iter()
+                .map(|field| node(ir, ctx, field.1))
+                .collect::<Vec<InstId>>();
+            ir.add_inst(Inst::Product(fields))
+        }
+        Node::Sum(Sum(variants)) => {
+            let variants = variants
+                .iter()
+                .map(|variant| node(ir, ctx, variant.1))
+                .collect::<Vec<InstId>>();
+            ir.add_inst(Inst::Sum(variants))
         }
         Node::TypeVar(x) => ir.add_inst(Inst::Hole(x.clone())),
         Node::Int(x) => ir.add_inst(Inst::Int(x.clone())),
@@ -190,6 +315,7 @@ fn decl(ir: &mut IR, ctx: &Context, decl: &Decl, parent: BlockId) -> InstId {
         kind: BlockKind::Value,
         insts: Vec::new(),
         parent: Some(parent),
+        labels: HashMap::new(),
     });
 
     ir.curr = block;
@@ -198,7 +324,9 @@ fn decl(ir: &mut IR, ctx: &Context, decl: &Decl, parent: BlockId) -> InstId {
     ir.add_inst(Inst::As { ty, val });
     ir.curr = parent;
 
-    ir.add_inst(Inst::Block(block))
+    let id = ir.add_inst(Inst::Block(block));
+    ir.add_label(id.clone(), decl.ident.clone());
+    id
 }
 
 pub fn generate(ctx: &Context, decls: Vec<Decl>) -> IR {
@@ -207,10 +335,12 @@ pub fn generate(ctx: &Context, decls: Vec<Decl>) -> IR {
         kind: BlockKind::Value,
         insts: Vec::new(),
         parent: None,
+        labels: HashMap::new(),
     });
 
     decls.iter().for_each(|x| {
         decl(&mut ir, ctx, x, 0);
     });
+    ir.resolve();
     ir
 }
