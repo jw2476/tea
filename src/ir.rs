@@ -2,8 +2,10 @@ use std::{collections::HashMap, fmt::Display};
 
 use crate::parse::{Context, Decl, Node, NodeId, Product, Sum};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstId {
+pub type StringId = usize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operand {
     Type,
     Unreachable,
     U8,
@@ -18,11 +20,13 @@ pub enum InstId {
     Isize,
     F32,
     F64,
-    Unresolved(String),
+    Constant(StringId),
+    Unresolved(StringId),
     Resolved(usize),
+    Block(BlockId),
 }
 
-impl InstId {
+impl Operand {
     fn to_index(&self) -> Option<usize> {
         match self {
             Self::Resolved(x) => Some(*x),
@@ -31,48 +35,50 @@ impl InstId {
     }
 }
 
-impl Display for InstId {
+pub type BlockId = usize;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opcode {
+    Block,
+    As,
+    Fn,
+    Arg,
+    Product,
+    Sum,
+    Hole,
+    Call,
+    Match,
+    Try,
+    Unreachable,
+    Int,
+}
+
+impl Display for Opcode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}",
             match self {
-                Self::Type => "type".to_string(),
-                Self::Unreachable => "unreachable".to_string(),
-                Self::U8 => "u8".to_string(),
-                Self::U16 => "u16".to_string(),
-                Self::U32 => "u32".to_string(),
-                Self::U64 => "u64".to_string(),
-                Self::Usize => "usize".to_string(),
-                Self::I8 => "i8".to_string(),
-                Self::I16 => "i16".to_string(),
-                Self::I32 => "i32".to_string(),
-                Self::I64 => "i64".to_string(),
-                Self::Isize => "isize".to_string(),
-                Self::F32 => "f32".to_string(),
-                Self::F64 => "f64".to_string(),
-                Self::Unresolved(id) => format!("%{}", id),
-                Self::Resolved(id) => format!("%{}", id),
+                Self::Block => "BLOCK",
+                Self::As => "AS",
+                Self::Fn => "FN",
+                Self::Arg => "ARG",
+                Self::Product => "PRODUCT",
+                Self::Sum => "SUM",
+                Self::Hole => "HOLE",
+                Self::Call => "CALL",
+                Self::Match => "MATCH",
+                Self::Try => "TRY",
+                Self::Unreachable => "UNREACHABLE",
+                Self::Int => "INT",
             }
         )
     }
 }
 
-pub type BlockId = usize;
 #[derive(Debug)]
-pub enum Inst {
-    Block(BlockId),
-    As { ty: InstId, val: InstId },
-    Fn { arg: InstId, ret: InstId },
-    Arg,
-    Product(Vec<InstId>),
-    Sum(Vec<InstId>),
-    Hole(Option<String>),
-    Call { func: InstId, arg: InstId },
-    Match { variant: usize, val: InstId },
-    Try(Vec<InstId>),
-    Unreachable,
-    Int(String),
+pub struct Inst {
+    op: Opcode,
+    args: Vec<Operand>,
 }
 
 #[derive(Debug)]
@@ -84,15 +90,16 @@ pub enum BlockKind {
 #[derive(Debug)]
 pub struct Block {
     kind: BlockKind,
-    insts: Vec<InstId>,
+    insts: Vec<usize>,
     parent: Option<BlockId>,
-    labels: HashMap<String, InstId>,
+    labels: HashMap<String, usize>,
 }
 
 #[derive(Default, Debug)]
 pub struct IR {
     insts: Vec<Inst>,
     blocks: Vec<Block>,
+    strings: Vec<String>,
     curr: BlockId,
 }
 
@@ -102,18 +109,23 @@ impl IR {
         self.blocks.len() - 1
     }
 
-    pub fn add_inst(&mut self, inst: Inst) -> InstId {
+    pub fn add_inst(&mut self, inst: Inst) -> Operand {
         self.insts.push(inst);
-        let id = InstId::Resolved(self.insts.len() - 1);
-        self.blocks[self.curr].insts.push(id.clone());
-        id
+        let id = self.insts.len() - 1;
+        self.blocks[self.curr].insts.push(id);
+        Operand::Resolved(id)
     }
 
-    pub fn add_label(&mut self, inst: InstId, label: String) {
+    pub fn add_string(&mut self, string: String) -> StringId {
+        self.strings.push(string);
+        self.strings.len() - 1
+    }
+
+    pub fn add_label(&mut self, inst: usize, label: String) {
         self.blocks[self.curr].labels.insert(label, inst);
     }
 
-    fn lookup(&self, block: &Block, label: &str) -> Option<InstId> {
+    fn lookup(&self, block: &Block, label: &str) -> Option<usize> {
         match block.labels.get(label) {
             Some(x) => Some(x.clone()),
             None => match block.parent {
@@ -123,38 +135,39 @@ impl IR {
         }
     }
 
-    fn display_inst(&self, inst: &Inst) -> String {
-        match inst {
-            Inst::As { ty, val } => format!("AS {ty} {val}"),
-            Inst::Block(block) => self.display_block(&self.blocks[*block]),
-            Inst::Int(x) => format!("INT {x}"),
-            Inst::Call { func, arg } => format!("CALL {func} {arg}"),
-            Inst::Hole(ident) => format!("HOLE {}", ident.clone().unwrap_or_default()),
-            Inst::Fn { arg, ret } => {
-                format!("FN {arg} {ret}")
-            }
-            Inst::Arg => "ARG".to_string(),
-            Inst::Product(fields) => format!(
-                "PRODUCT {}",
-                fields
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            ),
-            Inst::Sum(variants) => format!(
-                "SUM {}",
-                variants
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<String>>()
-                    .join(" ")
-            ),
-            _ => {
-                println!("{inst:?}");
-                todo!()
-            }
+    fn display_operand(&self, arg: Operand) -> String {
+        match arg {
+            Operand::Type => "type".to_string(),
+            Operand::Unreachable => "unreachable".to_string(),
+            Operand::U8 => "u8".to_string(),
+            Operand::U16 => "u16".to_string(),
+            Operand::U32 => "u32".to_string(),
+            Operand::U64 => "u64".to_string(),
+            Operand::Usize => "usize".to_string(),
+            Operand::I8 => "i8".to_string(),
+            Operand::I16 => "i16".to_string(),
+            Operand::I32 => "i32".to_string(),
+            Operand::I64 => "i64".to_string(),
+            Operand::Isize => "isize".to_string(),
+            Operand::F32 => "f32".to_string(),
+            Operand::F64 => "f64".to_string(),
+            Operand::Block(block) => self.display_block(&self.blocks[block]),
+            Operand::Constant(id) => self.strings[id].clone(),
+            Operand::Unresolved(id) => self.strings[id].clone(),
+            Operand::Resolved(id) => format!("%{}", id),
         }
+    }
+
+    fn display_inst(&self, inst: &Inst) -> String {
+        format!(
+            "{} {}",
+            inst.op,
+            inst.args
+                .iter()
+                .map(|x| self.display_operand(*x))
+                .collect::<Vec<String>>()
+                .join(" ")
+        )
     }
 
     fn display_block(&self, block: &Block) -> String {
@@ -168,12 +181,10 @@ impl IR {
                     format!(
                         "{}{inst} = {}",
                         label.map(|(x, _)| format!("{x}: ")).unwrap_or_default(),
-                        self.display_inst(&self.insts[inst.to_index().unwrap()])
+                        self.display_inst(&self.insts[*inst])
                     )
                 })
-                .collect::<Vec<String>>()
-                .join("\n")
-                .split('\n')
+                .flat_map(|x| x.split('\n').map(|x| x.to_owned()).collect::<Vec<String>>())
                 .map(|x| format!("  {x}"))
                 .collect::<Vec<String>>()
                 .join("\n")
@@ -192,21 +203,16 @@ impl IR {
     fn get_block(&self, id: usize) -> &Block {
         self.blocks
             .iter()
-            .find(|block| {
-                block
-                    .insts
-                    .iter()
-                    .find(|inst| inst == &&InstId::Resolved(id))
-                    .is_some()
-            })
+            .find(|block| block.insts.contains(&id))
             .unwrap()
     }
 
-    fn _resolve(&self, id: &InstId, base: usize) -> InstId {
+    fn _resolve(&self, id: Operand, base: usize) -> Operand {
         match id {
-            InstId::Unresolved(x) => self
-                .lookup(self.get_block(base), x)
-                .expect(&format!("Failed to resolve {x}")),
+            Operand::Unresolved(x) => Operand::Resolved(
+                self.lookup(self.get_block(base), &self.strings[x])
+                    .expect(&format!("Failed to resolve {x}")),
+            ),
             x => x.clone(),
         }
     }
@@ -216,55 +222,28 @@ impl IR {
             .insts
             .iter()
             .enumerate()
-            .map(|(i, inst)| match inst {
-                Inst::As { ty, val } => Inst::As {
-                    ty: self._resolve(ty, i),
-                    val: self._resolve(val, i),
-                },
-                Inst::Block(block) => Inst::Block(*block),
-                Inst::Fn { arg, ret } => Inst::Fn {
-                    arg: self._resolve(arg, i),
-                    ret: self._resolve(ret, i),
-                },
-                Inst::Arg => Inst::Arg,
-                Inst::Product(fields) => {
-                    Inst::Product(fields.iter().map(|field| self._resolve(field, i)).collect())
-                }
-                Inst::Sum(variants) => Inst::Sum(
-                    variants
-                        .iter()
-                        .map(|variant| self._resolve(variant, i))
-                        .collect(),
-                ),
-                Inst::Hole(_) => todo!(),
-                Inst::Call { func, arg } => Inst::Call {
-                    func: self._resolve(func, i),
-                    arg: self._resolve(arg, i),
-                },
-                Inst::Match { variant, val } => todo!(),
-                Inst::Try(branches) => {
-                    Inst::Try(branches.iter().map(|x| self._resolve(x, i)).collect())
-                }
-                Inst::Unreachable => Inst::Unreachable,
-                Inst::Int(x) => Inst::Int(x.clone()),
+            .map(|(i, inst)| Inst {
+                op: inst.op,
+                args: inst.args.iter().map(|x| self._resolve(*x, i)).collect(),
             })
             .collect::<Vec<Inst>>()
     }
 }
 
-fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> InstId {
+fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> Operand {
     println!("{:?}", ctx.nodes[id]);
     match &ctx.nodes[id] {
-        Node::Type => InstId::Type,
+        Node::Type => Operand::Type,
         Node::Var(Some(x)) => match x.as_str() {
-            "u32" => InstId::U32,
-            _ => InstId::Unresolved(x.clone()),
+            "u32" => Operand::U32,
+            _ => Operand::Unresolved(ir.add_string(x.clone())),
         },
         Node::Call((func, arg)) => {
             let arg = node(ir, ctx, *arg);
-            ir.add_inst(Inst::Call {
-                func: InstId::Unresolved(func.clone()),
-                arg,
+            let func = ir.add_string(func.clone());
+            ir.add_inst(Inst {
+                op: Opcode::Call,
+                args: vec![Operand::Unresolved(func), arg],
             })
         }
         Node::Lambda((arg, body)) => {
@@ -278,39 +257,70 @@ fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> InstId {
                 labels: HashMap::new(),
             });
             ir.curr = block;
-            let arg = ir.add_inst(Inst::Arg);
-            ir.add_label(arg, x.unwrap());
+            let arg = ir.add_inst(Inst {
+                op: Opcode::Arg,
+                args: Vec::new(),
+            });
+            ir.add_label(arg.to_index().unwrap(), x.unwrap());
             node(ir, ctx, *body);
 
             ir.curr = ir.blocks[ir.curr].parent.unwrap();
-            ir.add_inst(Inst::Block(block))
+            ir.add_inst(Inst {
+                op: Opcode::Block,
+                args: vec![Operand::Block(block)],
+            })
         }
         Node::Function((arg, ret)) => {
             let arg = node(ir, ctx, *arg);
             let ret = node(ir, ctx, *ret);
-            ir.add_inst(Inst::Fn { arg, ret })
+            ir.add_inst(Inst {
+                op: Opcode::Fn,
+                args: vec![arg, ret],
+            })
         }
         Node::Product(Product(fields)) => {
             let fields = fields
                 .iter()
                 .map(|field| node(ir, ctx, field.1))
-                .collect::<Vec<InstId>>();
-            ir.add_inst(Inst::Product(fields))
+                .collect::<Vec<Operand>>();
+            ir.add_inst(Inst {
+                op: Opcode::Product,
+                args: fields,
+            })
         }
         Node::Sum(Sum(variants)) => {
             let variants = variants
                 .iter()
                 .map(|variant| node(ir, ctx, variant.1))
-                .collect::<Vec<InstId>>();
-            ir.add_inst(Inst::Sum(variants))
+                .collect::<Vec<Operand>>();
+            ir.add_inst(Inst {
+                op: Opcode::Sum,
+                args: variants,
+            })
         }
-        Node::TypeVar(x) => ir.add_inst(Inst::Hole(x.clone())),
-        Node::Int(x) => ir.add_inst(Inst::Int(x.clone())),
+        Node::TypeVar(Some(x)) => {
+            let x = ir.add_string(x.clone());
+            ir.add_inst(Inst {
+                op: Opcode::Hole,
+                args: vec![Operand::Unresolved(x)],
+            })
+        }
+        Node::TypeVar(None) => ir.add_inst(Inst {
+            op: Opcode::Hole,
+            args: Vec::new(),
+        }),
+        Node::Int(x) => {
+            let x = ir.add_string(x.clone());
+            ir.add_inst(Inst {
+                op: Opcode::Int,
+                args: vec![Operand::Constant(x)],
+            })
+        }
         _ => todo!(),
     }
 }
 
-fn decl(ir: &mut IR, ctx: &Context, decl: &Decl, parent: BlockId) -> InstId {
+fn decl(ir: &mut IR, ctx: &Context, decl: &Decl, parent: BlockId) -> Operand {
     let block = ir.add_block(Block {
         kind: BlockKind::Value,
         insts: Vec::new(),
@@ -321,11 +331,17 @@ fn decl(ir: &mut IR, ctx: &Context, decl: &Decl, parent: BlockId) -> InstId {
     ir.curr = block;
     let ty = node(ir, ctx, decl.ty);
     let val = node(ir, ctx, decl.value);
-    ir.add_inst(Inst::As { ty, val });
+    ir.add_inst(Inst {
+        op: Opcode::As,
+        args: vec![ty, val],
+    });
     ir.curr = parent;
 
-    let id = ir.add_inst(Inst::Block(block));
-    ir.add_label(id.clone(), decl.ident.clone());
+    let id = ir.add_inst(Inst {
+        op: Opcode::Block,
+        args: vec![Operand::Block(block)],
+    });
+    ir.add_label(id.to_index().unwrap(), decl.ident.clone());
     id
 }
 
