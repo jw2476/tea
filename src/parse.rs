@@ -174,6 +174,7 @@ pub type Function = (NodeId, NodeId);
 pub type Match = (NodeId, Vec<NodeId>);
 pub type Access = (NodeId, String);
 pub type Variant = (String, NodeId);
+pub type Block = (Vec<Decl>, Option<NodeId>);
 
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -191,6 +192,7 @@ pub enum Node {
     Decimal(String),
     TypeVar(Option<String>),
     Variant(Variant),
+    Block(Block),
 }
 
 #[derive(Clone, Debug)]
@@ -331,6 +333,10 @@ fn variant(input: Input) -> Parsed<Variant> {
         .parse(input)
 }
 
+fn block(input: Input) -> Parsed<Block> {
+    delimited(left_curly, many0(decl).and(opt(expr)), right_curly).parse(input)
+}
+
 fn arg(input: Input) -> Parsed<NodeId> {
     let (mut input, expr) = alt((
         sum.map(Node::Sum),
@@ -413,6 +419,7 @@ fn _expr(input: Input) -> Parsed<NodeId> {
         function.map(Node::Function),
         lambda.map(Node::Lambda),
         sum.map(Node::Sum),
+        block.map(Node::Block),
         product.map(Node::Product),
         call.map(Node::Call),
         variant.map(Node::Variant),

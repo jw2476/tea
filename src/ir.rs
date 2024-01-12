@@ -378,6 +378,32 @@ fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> Operand {
                 args: vec![Operand::Field(variant), expr],
             })
         }
+        Node::Block((decls, expr)) => {
+            let parent = ir.curr;
+            let block = ir.add_block(Block {
+                kind: BlockKind::Value,
+                insts: Vec::new(),
+                parent: Some(parent),
+                labels: HashMap::new(),
+            });
+            ir.curr = block;
+            decls.iter().for_each(|x| {
+                decl(ir, ctx, x, ir.curr);
+            });
+            if expr.is_some() {
+                node(ir, ctx, expr.unwrap());
+            } else {
+                ir.add_inst(Inst {
+                    op: Opcode::Product,
+                    args: Vec::new(),
+                });
+            }
+            ir.curr = parent;
+            ir.add_inst(Inst {
+                op: Opcode::Block,
+                args: vec![Operand::Block(block)],
+            })
+        }
         _ => todo!(),
     }
 }
