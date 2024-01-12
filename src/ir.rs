@@ -21,7 +21,9 @@ pub enum Operand {
     F32,
     F64,
     Constant(StringId),
+    Field(StringId),
     Unresolved(StringId),
+    Hole(Option<StringId>),
     Resolved(usize),
     Block(BlockId),
 }
@@ -50,6 +52,8 @@ pub enum Opcode {
     Try,
     Unreachable,
     Int,
+    Get,
+    Variant,
 }
 
 impl Display for Opcode {
@@ -70,6 +74,8 @@ impl Display for Opcode {
                 Self::Try => "TRY",
                 Self::Unreachable => "UNREACHABLE",
                 Self::Int => "INT",
+                Self::Get => "GET",
+                Self::Variant => "VARIANT",
             }
         )
     }
@@ -127,7 +133,7 @@ impl IR {
 
     fn lookup(&self, block: &Block, label: &str) -> Option<usize> {
         match block.labels.get(label) {
-            Some(x) => Some(x.clone()),
+            Some(x) => Some(*x),
             None => match block.parent {
                 Some(parent) => self.lookup(&self.blocks[parent], label),
                 None => None,
@@ -153,6 +159,10 @@ impl IR {
             Operand::F64 => "f64".to_string(),
             Operand::Block(block) => self.display_block(&self.blocks[block]),
             Operand::Constant(id) => self.strings[id].clone(),
+            Operand::Field(id) => self.strings[id].clone(),
+            Operand::Hole(id) => id
+                .map(|x| format!("'{}", self.strings[x]))
+                .unwrap_or_default(),
             Operand::Unresolved(id) => self.strings[id].clone(),
             Operand::Resolved(id) => format!("%{}", id),
         }
@@ -172,14 +182,14 @@ impl IR {
 
     fn display_block(&self, block: &Block) -> String {
         format!(
-            "block {{\n{}\n}}",
+            "{{\n{}\n}}",
             block
                 .insts
                 .iter()
                 .map(|inst| {
                     let label = block.labels.iter().find(|(_, i)| *i == inst);
                     format!(
-                        "{}{inst} = {}",
+                        "{}%{inst} = {}",
                         label.map(|(x, _)| format!("{x}: ")).unwrap_or_default(),
                         self.display_inst(&self.insts[*inst])
                     )
@@ -211,13 +221,13 @@ impl IR {
         match id {
             Operand::Unresolved(x) => Operand::Resolved(
                 self.lookup(self.get_block(base), &self.strings[x])
-                    .expect(&format!("Failed to resolve {x}")),
+                    .expect(&format!("Failed to resolve {}", self.strings[x])),
             ),
-            x => x.clone(),
+            x => x,
         }
     }
 
-    fn resolve(&mut self) {
+    pub fn resolve(&mut self) {
         self.insts = self
             .insts
             .iter()
@@ -228,6 +238,30 @@ impl IR {
             })
             .collect::<Vec<Inst>>()
     }
+}
+
+fn pattern(ir: &mut IR, ctx: &Context, node: NodeId, arg: Operand) {
+    match &ctx.nodes[node] {
+        Node::Product(Product(fields)) => fields.iter().for_each(|(field, node)| {
+            let field = ir.add_string(field.clone());
+            let arg = ir.add_inst(Inst {
+                op: Opcode::Get,
+                args: vec![Operand::Field(field), arg],
+            });
+            pattern(ir, ctx, *node, arg);
+        }),
+        Node::Var(Some(x)) => ir.add_label(arg.to_index().unwrap(), x.clone()),
+        Node::Var(None) => {}
+        Node::Variant((variant, x)) => {
+            let variant = ir.add_string(variant.clone());
+            let arg = ir.add_inst(Inst {
+                op: Opcode::Match,
+                args: vec![Operand::Field(variant), arg],
+            });
+            pattern(ir, ctx, *x, arg);
+        }
+        _ => todo!(),
+    };
 }
 
 fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> Operand {
@@ -247,9 +281,6 @@ fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> Operand {
             })
         }
         Node::Lambda((arg, body)) => {
-            let Node::Var(x) = ctx.nodes[*arg].clone() else {
-                todo!()
-            };
             let block = ir.add_block(Block {
                 kind: BlockKind::Func,
                 insts: Vec::new(),
@@ -257,11 +288,11 @@ fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> Operand {
                 labels: HashMap::new(),
             });
             ir.curr = block;
-            let arg = ir.add_inst(Inst {
+            let arg_inst = ir.add_inst(Inst {
                 op: Opcode::Arg,
                 args: Vec::new(),
             });
-            ir.add_label(arg.to_index().unwrap(), x.unwrap());
+            pattern(ir, ctx, *arg, arg_inst);
             node(ir, ctx, *body);
 
             ir.curr = ir.blocks[ir.curr].parent.unwrap();
@@ -302,7 +333,7 @@ fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> Operand {
             let x = ir.add_string(x.clone());
             ir.add_inst(Inst {
                 op: Opcode::Hole,
-                args: vec![Operand::Unresolved(x)],
+                args: vec![Operand::Hole(Some(x))],
             })
         }
         Node::TypeVar(None) => ir.add_inst(Inst {
@@ -314,6 +345,37 @@ fn node(ir: &mut IR, ctx: &Context, id: NodeId) -> Operand {
             ir.add_inst(Inst {
                 op: Opcode::Int,
                 args: vec![Operand::Constant(x)],
+            })
+        }
+        Node::Access((expr, field)) => {
+            let field = ir.add_string(field.clone());
+            let expr = node(ir, ctx, *expr);
+            ir.add_inst(Inst {
+                op: Opcode::Get,
+                args: vec![Operand::Field(field), expr],
+            })
+        }
+        Node::Match((expr, branches)) => {
+            let expr = node(ir, ctx, *expr);
+            let args = [expr]
+                .into_iter()
+                .chain(branches.iter().map(|branch| node(ir, ctx, *branch)))
+                .collect::<Vec<Operand>>();
+            ir.add_inst(Inst {
+                op: Opcode::Try,
+                args,
+            })
+        }
+        Node::Unreachable => ir.add_inst(Inst {
+            op: Opcode::Unreachable,
+            args: Vec::new(),
+        }),
+        Node::Variant((variant, expr)) => {
+            let variant = ir.add_string(variant.clone());
+            let expr = node(ir, ctx, *expr);
+            ir.add_inst(Inst {
+                op: Opcode::Variant,
+                args: vec![Operand::Field(variant), expr],
             })
         }
         _ => todo!(),
@@ -357,6 +419,5 @@ pub fn generate(ctx: &Context, decls: Vec<Decl>) -> IR {
     decls.iter().for_each(|x| {
         decl(&mut ir, ctx, x, 0);
     });
-    ir.resolve();
     ir
 }

@@ -160,15 +160,8 @@ tok_parser!(colon, Token::Colon, MissingColon);
 tok_parser!(underscore, Token::Underscore, MissingUnderscore);
 tok_parser!(tick, Token::Tick, MissingTick);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Path {
-    pub parts: Vec<String>,
-}
-
-fn path(input: Input) -> Parsed<Path> {
-    separated_list1(double_colon, ident)
-        .map(|parts| Path { parts })
-        .parse(input)
+fn path(input: Input) -> Parsed<Vec<String>> {
+    separated_list1(double_colon, ident).parse(input)
 }
 
 pub type NodeId = usize;
@@ -180,6 +173,7 @@ pub type Call = (String, NodeId);
 pub type Function = (NodeId, NodeId);
 pub type Match = (NodeId, Vec<NodeId>);
 pub type Access = (NodeId, String);
+pub type Variant = (String, NodeId);
 
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -196,6 +190,7 @@ pub enum Node {
     Int(String),
     Decimal(String),
     TypeVar(Option<String>),
+    Variant(Variant),
 }
 
 #[derive(Clone, Debug)]
@@ -330,11 +325,18 @@ fn access(input: Input) -> Parsed<Access> {
         .parse(input)
 }
 
+fn variant(input: Input) -> Parsed<Variant> {
+    ident
+        .and(delimited(left_square, expr, right_square))
+        .parse(input)
+}
+
 fn arg(input: Input) -> Parsed<NodeId> {
     let (mut input, expr) = alt((
         sum.map(Node::Sum),
         product.map(Node::Product),
         call.map(Node::Call),
+        variant.map(Node::Variant),
         delimited(left_round, function, right_round).map(Node::Function),
         pmatch.map(Node::Match),
         access.map(Node::Access),
@@ -357,6 +359,7 @@ fn base(input: Input) -> Parsed<NodeId> {
         sum.map(Node::Sum),
         product.map(Node::Product),
         call.map(Node::Call),
+        variant.map(Node::Variant),
         pmatch.map(Node::Match),
         ident.map(|x| Node::Var(Some(x))),
         tick.and(ident).map(|(_, x)| Node::TypeVar(Some(x))),
@@ -367,15 +370,53 @@ fn base(input: Input) -> Parsed<NodeId> {
     Ok((input, id))
 }
 
-fn expr(input: Input) -> Parsed<NodeId> {
+enum Part {
+    Call(Call),
+    Access(String),
+}
+
+fn complex_expr(input: Input) -> Parsed<NodeId> {
+    let (mut input, (base, parts)) = base
+        .and(dot)
+        .and(separated_list1(
+            dot,
+            call.map(Part::Call).or(int.or(ident).map(Part::Access)),
+        ))
+        .map(|((expr, _), parts)| (expr, parts))
+        .parse(input)?;
+
+    let id = parts.into_iter().fold(base, |expr, part| match part {
+        Part::Call((func, arg)) => {
+            let arg = if let Node::Product(Product(fields)) = &mut input.ctx.nodes[arg] {
+                *fields = [expr]
+                    .iter()
+                    .chain(fields.iter().map(|(_, x)| x))
+                    .enumerate()
+                    .map(|(i, field)| (i.to_string(), *field))
+                    .collect();
+                arg
+            } else {
+                input.ctx.add_node(Node::Product(Product(vec![
+                    ("0".to_string(), expr),
+                    ("1".to_string(), arg),
+                ])))
+            };
+            input.ctx.add_node(Node::Call((func, arg)))
+        }
+        Part::Access(field) => input.ctx.add_node(Node::Access((expr, field))),
+    });
+    Ok((input, id))
+}
+
+fn _expr(input: Input) -> Parsed<NodeId> {
     let (mut input, expr) = alt((
         function.map(Node::Function),
         lambda.map(Node::Lambda),
         sum.map(Node::Sum),
         product.map(Node::Product),
         call.map(Node::Call),
+        variant.map(Node::Variant),
         pmatch.map(Node::Match),
-        access.map(Node::Access),
         keyword("type").map(|_| Node::Type),
         keyword("unreachable").map(|_| Node::Unreachable),
         ident.map(|x| Node::Var(Some(x))),
@@ -390,6 +431,10 @@ fn expr(input: Input) -> Parsed<NodeId> {
     Ok((input, id))
 }
 
+fn expr(input: Input) -> Parsed<NodeId> {
+    complex_expr.or(_expr).parse(input)
+}
+
 fn fdecl(input: Input) -> Parsed<(String, NodeId)> {
     let Token::Identifier(x) = input.tokens[0].clone() else {
         return Err(Err::Error(Error {
@@ -399,7 +444,7 @@ fn fdecl(input: Input) -> Parsed<(String, NodeId)> {
     };
     let (mut input, branches) = many1(
         keyword(&x)
-            .and(function)
+            .and(lambda)
             .and(semicolon)
             .map(|((_, function), _)| function),
     )
@@ -408,10 +453,10 @@ fn fdecl(input: Input) -> Parsed<(String, NodeId)> {
     let x2 = input.ctx.add_node(Node::Var(Some("x".to_string())));
     let branches = branches
         .into_iter()
-        .map(|branch| input.ctx.add_node(Node::Function(branch)))
+        .map(|branch| input.ctx.add_node(Node::Lambda(branch)))
         .collect();
     let m = input.ctx.add_node(Node::Match((x1, branches)));
-    let function = input.ctx.add_node(Node::Function((x2, m)));
+    let function = input.ctx.add_node(Node::Lambda((x2, m)));
     Ok((input, (x, function)))
 }
 

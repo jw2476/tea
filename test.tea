@@ -1,16 +1,14 @@
-a: type = u32;
+Vec2: type = {u32, u32};
+add_vec2: {Vec2, Vec2} -> Vec2 = {{a, b}, {c, d}} => {a.add(c), b.add(d)};
+
 Option: type -> type = x => [Some x, None {}];
-unwrap: Option(u32) = 0;
+unwrap :: Option('a) -> 'a;
+unwrap Some[x] => x;
+unwrap None[_] => unreachable;
+
 add: {u32, u32} -> u32 = {};
 inc: u32 -> u32 = x => add(x, 1);
-// unwrap: Option('a) -> 'a = opt => match opt {
-// 	Some(x) => x,
-//	None(_) => unreachable
-// };
 
-// Vec2: type = {u32, u32};
-// add: {Vec2, Vec2} -> Vec2 = {x, y} -> {add(x.0, y.0), add(x.1, y.1)};
-
-// map :: {Option('a), 'a -> 'b} -> Option('b);
-// map {Some(x), f} -> Some(f(x));
-// map {None(_), _} -> None();
+map :: {Option('a), 'a -> 'b} -> Option('b); 
+map {Some[x], f} => Some[f(x)];
+map {None[_], _} => None[{}];
