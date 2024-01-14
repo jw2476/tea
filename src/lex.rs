@@ -20,6 +20,8 @@ pub enum Token {
     RightSquare,
     LeftCurly,
     RightCurly,
+    LeftAngle,
+    RightAngle,
 
     Identifier(String),
     Integer(String),
@@ -74,6 +76,8 @@ pub fn tokenize(text: &str) -> Vec<Token> {
             ']' => Token::RightSquare,
             '{' => Token::LeftCurly,
             '}' => Token::RightCurly,
+            '<' => Token::LeftAngle,
+            '>' => Token::RightAngle,
 
             '/' => {
                 while *chars.peek().unwrap() != '\n' {

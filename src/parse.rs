@@ -31,6 +31,8 @@ pub enum ErrorKind {
     MissingRightCurly,
     MissingLeftRound,
     MissingRightRound,
+    MissingLeftAngle,
+    MissingRightAngle,
     MissingArrow,
     MissingSemicolon,
     MissingInteger,
@@ -159,33 +161,35 @@ tok_parser!(dot, Token::Dot, MissingDot);
 tok_parser!(colon, Token::Colon, MissingColon);
 tok_parser!(underscore, Token::Underscore, MissingUnderscore);
 tok_parser!(tick, Token::Tick, MissingTick);
+tok_parser!(left_angle, Token::LeftAngle, MissingLeftAngle);
+tok_parser!(right_angle, Token::RightAngle, MissingRightAngle);
 
 fn path(input: Input) -> Parsed<Vec<String>> {
     separated_list1(double_colon, ident).parse(input)
 }
 
-pub type NodeId = usize;
+pub type ExprId = usize;
+pub type TypeId = usize;
 #[derive(Clone, Debug)]
-pub struct Sum(pub Vec<(String, NodeId)>);
+pub struct Sum<T>(pub Vec<(String, T)>);
 #[derive(Clone, Debug)]
-pub struct Product(pub Vec<(String, NodeId)>);
-pub type Call = (String, NodeId);
-pub type Function = (NodeId, NodeId);
-pub type Match = (NodeId, Vec<NodeId>);
-pub type Access = (NodeId, String);
-pub type Variant = (String, NodeId);
-pub type Block = (Vec<Decl>, Option<NodeId>);
+pub struct Product<T>(pub Vec<(String, T)>);
+pub type Call = (String, ExprId);
+pub type Function = (TypeId, TypeId);
+pub type Lambda = (ExprId, ExprId);
+pub type Match = (ExprId, Vec<ExprId>);
+pub type Access = (ExprId, String);
+pub type Variant = (String, ExprId);
+pub type Block = (Vec<Decl>, Option<ExprId>);
 
 #[derive(Clone, Debug)]
-pub enum Node {
-    Sum(Sum),
-    Product(Product),
+pub enum Expr {
+    Sum(Sum<ExprId>),
+    Product(Product<ExprId>),
     Call(Call),
-    Function(Function),
-    Lambda(Function),
+    Lambda(Lambda),
     Match(Match),
     Access(Access),
-    Type,
     Unreachable,
     Var(Option<String>),
     Int(String),
@@ -196,29 +200,41 @@ pub enum Node {
 }
 
 #[derive(Clone, Debug)]
+pub enum Type {
+    Sum(Sum<TypeId>),
+    Product(Product<TypeId>),
+    Function(Function),
+    Named((String, Vec<String>)),
+    TypeVar(String),
+}
+
+#[derive(Clone, Debug)]
 pub struct Decl {
     pub ident: String,
-    pub ty: NodeId,
-    pub value: NodeId,
+    pub generics: Vec<String>,
+    pub ty: TypeId,
+    pub value: Option<ExprId>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Context {
-    pub nodes: Vec<Node>,
+    pub exprs: Vec<Expr>,
+    pub types: Vec<Type>,
 }
 
 impl Context {
-    pub fn add_node(&mut self, node: Node) -> NodeId
-where {
-        self.nodes.push(node.into());
-        self.nodes.len() - 1
+    pub fn add_expr(&mut self, expr: Expr) -> ExprId {
+        self.exprs.push(expr);
+        self.exprs.len() - 1
     }
-    pub fn get(&self, id: NodeId) -> Option<&Node> {
-        self.nodes.get(id)
+
+    pub fn add_ty(&mut self, ty: Type) -> ExprId {
+        self.types.push(ty);
+        self.types.len() - 1
     }
 }
 
-fn sum(input: Input) -> Parsed<Sum> {
+fn sum_expr(input: Input) -> Parsed<Sum<ExprId>> {
     delimited(
         left_square,
         separated_list1(comma, ident.and(expr)),
@@ -228,7 +244,26 @@ fn sum(input: Input) -> Parsed<Sum> {
     .parse(input)
 }
 
-fn product(input: Input) -> Parsed<Product> {
+fn opt_ty(input: Input) -> Parsed<TypeId> {
+    let (mut input, ty) = opt(ty).parse(input)?;
+    if let Some(ty) = ty {
+        return Ok((input, ty));
+    }
+    let ty = input.ctx.add_ty(Type::Product(Product(Vec::new())));
+    Ok((input, ty))
+}
+
+fn sum_ty(input: Input) -> Parsed<Sum<TypeId>> {
+    delimited(
+        left_square,
+        separated_list1(comma, ident.and(opt_ty)),
+        right_square,
+    )
+    .map(Sum)
+    .parse(input)
+}
+
+fn product_expr(input: Input) -> Parsed<Product<ExprId>> {
     let labelled = delimited(
         left_curly,
         separated_list0(comma, ident.or(int).and(expr)),
@@ -237,7 +272,7 @@ fn product(input: Input) -> Parsed<Product> {
     .map(Product);
 
     let unlabelled =
-        delimited(left_curly, separated_list0(comma, expr), right_curly).map(|exprs| {
+        delimited(left_round, separated_list0(comma, expr), right_round).map(|exprs| {
             Product(
                 exprs
                     .into_iter()
@@ -246,6 +281,27 @@ fn product(input: Input) -> Parsed<Product> {
                     .collect(),
             )
         });
+
+    labelled.or(unlabelled).parse(input)
+}
+
+fn product_ty(input: Input) -> Parsed<Product<TypeId>> {
+    let labelled = delimited(
+        left_curly,
+        separated_list0(comma, ident.or(int).and(ty)),
+        right_curly,
+    )
+    .map(Product);
+
+    let unlabelled = delimited(left_round, separated_list0(comma, ty), right_round).map(|exprs| {
+        Product(
+            exprs
+                .into_iter()
+                .enumerate()
+                .map(|(i, expr)| (i.to_string(), expr))
+                .collect(),
+        )
+    });
 
     labelled.or(unlabelled).parse(input)
 }
@@ -265,7 +321,7 @@ fn _call_multiple(input: Input) -> Parsed<Call> {
         ))
         .parse(input)?;
 
-    let product = input.ctx.add_node(Node::Product(Product(
+    let product = input.ctx.add_expr(Expr::Product(Product(
         exprs
             .into_iter()
             .enumerate()
@@ -281,13 +337,14 @@ fn call(input: Input) -> Parsed<Call> {
 
 fn function(input: Input) -> Parsed<Function> {
     arg.and(arrow)
-        .and(expr)
+        .and(ty)
         .map(|((x, _), y)| (x, y))
         .parse(input)
 }
 
-fn lambda(input: Input) -> Parsed<Function> {
-    arg.and(wide_arrow)
+fn lambda(input: Input) -> Parsed<Lambda> {
+    pattern
+        .and(arrow)
         .and(expr)
         .map(|((x, _), y)| (x, y))
         .parse(input)
@@ -308,28 +365,30 @@ fn pmatch(input: Input) -> Parsed<Match> {
         .and(expr)
         .and(delimited(
             left_curly,
-            separated_list1(comma, function),
+            separated_list1(comma, lambda),
             right_curly,
         ))
         .map(|((_, x), y)| (x, y))
         .parse(input)?;
     let branches = branches
         .into_iter()
-        .map(|branch| input.ctx.add_node(Node::Function(branch)))
+        .map(|branch| input.ctx.add_expr(Expr::Lambda(branch)))
         .collect();
     Ok((input, (expr, branches)))
 }
 
-fn access(input: Input) -> Parsed<Access> {
-    base.and(dot)
-        .and(ident.or(int))
-        .map(|((x, _), y)| (x, y))
-        .parse(input)
-}
-
 fn variant(input: Input) -> Parsed<Variant> {
+    fn opt_expr(input: Input) -> Parsed<ExprId> {
+        let (mut input, expr) = opt(expr).parse(input)?;
+        let expr = match expr {
+            Some(expr) => expr,
+            None => input.ctx.add_expr(Expr::Product(Product(Vec::new()))),
+        };
+        Ok((input, expr))
+    }
+
     ident
-        .and(delimited(left_square, expr, right_square))
+        .and(delimited(left_square, opt_expr, right_square))
         .parse(input)
 }
 
@@ -337,42 +396,45 @@ fn block(input: Input) -> Parsed<Block> {
     delimited(left_curly, many0(decl).and(opt(expr)), right_curly).parse(input)
 }
 
-fn arg(input: Input) -> Parsed<NodeId> {
-    let (mut input, expr) = alt((
-        sum.map(Node::Sum),
-        product.map(Node::Product),
-        call.map(Node::Call),
-        variant.map(Node::Variant),
-        delimited(left_round, function, right_round).map(Node::Function),
-        pmatch.map(Node::Match),
-        access.map(Node::Access),
-        keyword("type").map(|_| Node::Type),
-        keyword("unreachable").map(|_| Node::Unreachable),
-        ident.map(|x| Node::Var(Some(x))),
-        underscore.map(|_| Node::Var(None)),
-        int.map(Node::Int),
-        decimal.map(Node::Decimal),
-        tick.and(ident).map(|(_, x)| Node::TypeVar(Some(x))),
-        tick.and(underscore).map(|_| Node::TypeVar(None)),
+fn ty(input: Input) -> Parsed<TypeId> {
+    let (mut input, ty) = alt((
+        function.map(Type::Function),
+        sum_ty.map(Type::Sum),
+        product_ty.map(Type::Product),
+        ident.and(generics).map(Type::Named),
+        tick.and(ident).map(|(_, x)| Type::TypeVar(x)),
     ))
     .parse(input)?;
-    let id = input.ctx.add_node(expr);
+    let id = input.ctx.add_ty(ty);
     Ok((input, id))
 }
 
-fn base(input: Input) -> Parsed<NodeId> {
-    let (mut input, expr) = alt((
-        sum.map(Node::Sum),
-        product.map(Node::Product),
-        call.map(Node::Call),
-        variant.map(Node::Variant),
-        pmatch.map(Node::Match),
-        ident.map(|x| Node::Var(Some(x))),
-        tick.and(ident).map(|(_, x)| Node::TypeVar(Some(x))),
-        tick.and(underscore).map(|_| Node::TypeVar(None)),
+fn arg(input: Input) -> Parsed<TypeId> {
+    let (mut input, ty) = alt((
+        sum_ty.map(Type::Sum),
+        product_ty.map(Type::Product),
+        delimited(left_round, function, right_round).map(Type::Function),
+        ident.and(generics).map(Type::Named),
+        tick.and(ident).map(|(_, x)| Type::TypeVar(x)),
     ))
     .parse(input)?;
-    let id = input.ctx.add_node(expr);
+    let id = input.ctx.add_ty(ty);
+    Ok((input, id))
+}
+
+fn base(input: Input) -> Parsed<ExprId> {
+    let (mut input, expr) = alt((
+        sum_expr.map(Expr::Sum),
+        product_expr.map(Expr::Product),
+        call.map(Expr::Call),
+        variant.map(Expr::Variant),
+        pmatch.map(Expr::Match),
+        ident.map(|x| Expr::Var(Some(x))),
+        tick.and(ident).map(|(_, x)| Expr::TypeVar(Some(x))),
+        tick.and(underscore).map(|_| Expr::TypeVar(None)),
+    ))
+    .parse(input)?;
+    let id = input.ctx.add_expr(expr);
     Ok((input, id))
 }
 
@@ -381,7 +443,7 @@ enum Part {
     Access(String),
 }
 
-fn complex_expr(input: Input) -> Parsed<NodeId> {
+fn complex_expr(input: Input) -> Parsed<ExprId> {
     let (mut input, (base, parts)) = base
         .and(dot)
         .and(separated_list1(
@@ -393,7 +455,7 @@ fn complex_expr(input: Input) -> Parsed<NodeId> {
 
     let id = parts.into_iter().fold(base, |expr, part| match part {
         Part::Call((func, arg)) => {
-            let arg = if let Node::Product(Product(fields)) = &mut input.ctx.nodes[arg] {
+            let arg = if let Expr::Product(Product(fields)) = &mut input.ctx.exprs[arg] {
                 *fields = [expr]
                     .iter()
                     .chain(fields.iter().map(|(_, x)| x))
@@ -402,47 +464,58 @@ fn complex_expr(input: Input) -> Parsed<NodeId> {
                     .collect();
                 arg
             } else {
-                input.ctx.add_node(Node::Product(Product(vec![
+                input.ctx.add_expr(Expr::Product(Product(vec![
                     ("0".to_string(), expr),
                     ("1".to_string(), arg),
                 ])))
             };
-            input.ctx.add_node(Node::Call((func, arg)))
+            input.ctx.add_expr(Expr::Call((func, arg)))
         }
-        Part::Access(field) => input.ctx.add_node(Node::Access((expr, field))),
+        Part::Access(field) => input.ctx.add_expr(Expr::Access((expr, field))),
     });
     Ok((input, id))
 }
 
-fn _expr(input: Input) -> Parsed<NodeId> {
+fn pattern(input: Input) -> Parsed<ExprId> {
     let (mut input, expr) = alt((
-        function.map(Node::Function),
-        lambda.map(Node::Lambda),
-        sum.map(Node::Sum),
-        block.map(Node::Block),
-        product.map(Node::Product),
-        call.map(Node::Call),
-        variant.map(Node::Variant),
-        pmatch.map(Node::Match),
-        keyword("type").map(|_| Node::Type),
-        keyword("unreachable").map(|_| Node::Unreachable),
-        ident.map(|x| Node::Var(Some(x))),
-        underscore.map(|_| Node::Var(None)),
-        int.map(Node::Int),
-        decimal.map(Node::Decimal),
-        tick.and(ident).map(|(_, x)| Node::TypeVar(Some(x))),
-        tick.and(underscore).map(|_| Node::TypeVar(None)),
+        sum_expr.map(Expr::Sum),
+        product_expr.map(Expr::Product),
+        variant.map(Expr::Variant),
+        ident.map(|x| Expr::Var(Some(x))),
+        underscore.map(|_| Expr::Var(None)),
     ))
     .parse(input)?;
-    let id = input.ctx.add_node(expr);
+    let id = input.ctx.add_expr(expr);
     Ok((input, id))
 }
 
-fn expr(input: Input) -> Parsed<NodeId> {
+fn _expr(input: Input) -> Parsed<ExprId> {
+    let (mut input, expr) = alt((
+        lambda.map(Expr::Lambda),
+        sum_expr.map(Expr::Sum),
+        block.map(Expr::Block),
+        product_expr.map(Expr::Product),
+        call.map(Expr::Call),
+        variant.map(Expr::Variant),
+        pmatch.map(Expr::Match),
+        keyword("unreachable").map(|_| Expr::Unreachable),
+        ident.map(|x| Expr::Var(Some(x))),
+        underscore.map(|_| Expr::Var(None)),
+        int.map(Expr::Int),
+        decimal.map(Expr::Decimal),
+        tick.and(ident).map(|(_, x)| Expr::TypeVar(Some(x))),
+        tick.and(underscore).map(|_| Expr::TypeVar(None)),
+    ))
+    .parse(input)?;
+    let id = input.ctx.add_expr(expr);
+    Ok((input, id))
+}
+
+fn expr(input: Input) -> Parsed<ExprId> {
     complex_expr.or(_expr).parse(input)
 }
 
-fn fdecl(input: Input) -> Parsed<(String, NodeId)> {
+fn fdecl(input: Input) -> Parsed<(String, ExprId)> {
     let Token::Identifier(x) = input.tokens[0].clone() else {
         return Err(Err::Error(Error {
             kind: ErrorKind::MissingIdent,
@@ -456,41 +529,59 @@ fn fdecl(input: Input) -> Parsed<(String, NodeId)> {
             .map(|((_, function), _)| function),
     )
     .parse(input)?;
-    let x1 = input.ctx.add_node(Node::Var(Some("x".to_string())));
-    let x2 = input.ctx.add_node(Node::Var(Some("x".to_string())));
+    let x1 = input.ctx.add_expr(Expr::Var(Some("x".to_string())));
+    let x2 = input.ctx.add_expr(Expr::Var(Some("x".to_string())));
     let branches = branches
         .into_iter()
-        .map(|branch| input.ctx.add_node(Node::Lambda(branch)))
+        .map(|branch| input.ctx.add_expr(Expr::Lambda(branch)))
         .collect();
-    let m = input.ctx.add_node(Node::Match((x1, branches)));
-    let function = input.ctx.add_node(Node::Lambda((x2, m)));
+    let m = input.ctx.add_expr(Expr::Match((x1, branches)));
+    let function = input.ctx.add_expr(Expr::Lambda((x2, m)));
     Ok((input, (x, function)))
+}
+
+fn generics(input: Input) -> Parsed<Vec<String>> {
+    opt(delimited(
+        left_angle,
+        separated_list1(comma, tick.and(ident).map(|(_, x)| x)),
+        right_angle,
+    ))
+    .map(|x| x.unwrap_or_default())
+    .parse(input)
 }
 
 fn decl(input: Input) -> Parsed<Decl> {
     let combined = ident
+        .and(generics)
         .and(colon)
-        .and(expr)
+        .and(ty)
         .and(equals)
         .and(expr)
         .and(semicolon)
-        .map(|(((((ident, _), ty), _), value), _)| Decl { ident, ty, value });
+        .map(|((((((ident, generics), _), ty), _), value), _)| Decl {
+            ident,
+            generics,
+            ty,
+            value: Some(value),
+        });
 
     let tdecl = ident
+        .and(generics)
         .and(double_colon)
-        .and(expr)
+        .and(ty)
         .and(semicolon)
-        .map(|(((ident, _), ty), _)| (ident, ty));
+        .map(|((((ident, generics), _), ty), _)| (ident, generics, ty));
     let vdecl = ident
         .and(equals)
         .and(expr)
         .and(semicolon)
         .map(|(((ident, _), value), _)| (ident, value));
 
-    let split = tdecl.and(vdecl.or(fdecl)).map(|(tdecl, vdecl)| Decl {
+    let split = tdecl.and(opt(vdecl.or(fdecl))).map(|(tdecl, vdecl)| Decl {
         ident: tdecl.0,
-        ty: tdecl.1,
-        value: vdecl.1,
+        generics: tdecl.1,
+        ty: tdecl.2,
+        value: vdecl.map(|x| x.1),
     });
 
     combined.or(split).parse(input)
@@ -499,7 +590,10 @@ fn decl(input: Input) -> Parsed<Decl> {
 pub fn parse_tokens(tokens: &[Token]) -> Option<(Context, Vec<Decl>)> {
     let (input, decls) = many0(decl)
         .parse(Input {
-            ctx: Context { nodes: Vec::new() },
+            ctx: Context {
+                exprs: Vec::new(),
+                types: Vec::new(),
+            },
             tokens,
         })
         .ok()?;
