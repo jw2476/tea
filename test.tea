@@ -1,34 +1,39 @@
-Vec2 :: (u32, u32);
-add_vec2: (Vec2, Vec2) -> Vec2 = ((a, b), (c, d)) -> (a.add(c), b.add(d));
+Vec2<T> :: (T, T);
 
-Option<'a> :: [Some 'a, None];
-unwrap<'a> :: Option<'a> -> 'a;
+Option<T> :: [Some T, None];
+unwrap<T> :: Option<T> -> T;
 unwrap Some[x] -> x;
 unwrap None[_] -> unreachable;
 
+add<A, B, O> :: (A, B) -> O;
 add: (u32, u32) -> u32 = ();
+add<T>: (Vec2<T>, Vec2<T>) -> Vec2<T> = (l, r) -> (l.0.add(r.0), l.1.add(r.1));
 inc: u32 -> u32 = x -> x.add(1);
 
-map<'a, 'b> :: (Option<'a>, 'a -> 'b) -> Option<'b>; 
+map<A, B> :: (Option<A>, A -> B) -> Option<B>; 
 map (Some[x], f) -> Some[f(x)];
 map (None[_], _) -> None[{}];
 
-if<'a> :: (bool, 'a, 'a) -> 'a;
+if<T> :: (bool, T, T) -> T;
 if (true, x, _) -> x;
 if (false, _, x) -> x;
 
-Slice<'a> :: {len usize, data Ptr<'a>};
-get<'a>: (Slice<'a>, usize) -> Option<'a> 
+size<T> :: usize;
+size<u8>: usize = 1;
+size<u32>: usize = 4;
+
+Slice<T> :: {len usize, data Ptr<T>};
+get<T>: (Slice<T>, usize) -> Option<T> 
   = (slice, index) -> if(
     index.less(slice.len),
-    Some[slice.data.add('a.size().mul(index)).deref()], 
-    None[]
+    Some[slice.data.add(size<T>.mul(index)).deref()], 
+    None[{}]
   );
 
 main: () -> () = x -> {
   a: u32 = 1;
   b: u32 = 0;
-  c: Vec2 = (a, b);
-  d: Vec2 = (3, 2);
-  e: Vec2 = c.add(d);
+  c: Vec2<u32> = (a, b);
+  d: Vec2<u32> = (3, 2);
+  e: Vec2<u32> = c.add(d);
 };

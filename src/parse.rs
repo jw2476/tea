@@ -80,6 +80,7 @@ impl<'a> ParseError<Input<'a>> for Error {
 #[derive(Clone)]
 pub struct Input<'a> {
     ctx: Context,
+    scopes: Vec<Block>,
     tokens: &'a [Token],
 }
 
@@ -87,6 +88,7 @@ impl<'a> Input<'a> {
     pub fn slice(self, range: RangeFrom<usize>) -> Self {
         Self {
             ctx: self.ctx,
+            scopes: Vec::new(),
             tokens: &self.tokens[range],
         }
     }
@@ -184,6 +186,7 @@ pub type Block = (Vec<Decl>, Option<ExprId>);
 
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Arg,
     Sum(Sum<ExprId>),
     Product(Product<ExprId>),
     Call(Call),
@@ -191,7 +194,9 @@ pub enum Expr {
     Match(Match),
     Access(Access),
     Unreachable,
-    Var(Option<String>),
+    Ignore,
+    Var((ExprId, TypeId)),
+    Symbol((String, Vec<String>)),
     Int(String),
     Decimal(String),
     TypeVar(Option<String>),
@@ -205,7 +210,7 @@ pub enum Type {
     Product(Product<TypeId>),
     Function(Function),
     Named((String, Vec<String>)),
-    TypeVar(String),
+    Var(String),
 }
 
 #[derive(Clone, Debug)]
@@ -232,6 +237,24 @@ impl Context {
         self.types.push(ty);
         self.types.len() - 1
     }
+}
+
+fn variable(input: Input) -> Parsed<ExprId> {
+    let (mut input, (ident, generics)) = ident.and(generics).parse(input)?;
+    let expr = if let Some(decl) = input
+        .scopes
+        .last()
+        .unwrap()
+        .0
+        .iter()
+        .find(|d| d.ident == ident)
+    {
+        Expr::Var((decl.value.expect("referenced decl with no value"), decl.ty))
+    } else {
+        Expr::Symbol((ident, generics))
+    };
+    let expr = input.ctx.add_expr(expr);
+    Ok((input, expr))
 }
 
 fn sum_expr(input: Input) -> Parsed<Sum<ExprId>> {
@@ -392,8 +415,13 @@ fn variant(input: Input) -> Parsed<Variant> {
         .parse(input)
 }
 
-fn block(input: Input) -> Parsed<Block> {
-    delimited(left_curly, many0(decl).and(opt(expr)), right_curly).parse(input)
+fn block(mut input: Input) -> Parsed<Block> {
+    input.scopes.push((Vec::new(), None));
+    let (mut input, (_, expr)) =
+        delimited(left_curly, many0(decl).and(opt(expr)), right_curly).parse(input)?;
+    input.scopes.last_mut().unwrap().1 = expr;
+    let block = input.scopes.pop().unwrap();
+    Ok((input, block))
 }
 
 fn ty(input: Input) -> Parsed<TypeId> {
@@ -402,7 +430,7 @@ fn ty(input: Input) -> Parsed<TypeId> {
         sum_ty.map(Type::Sum),
         product_ty.map(Type::Product),
         ident.and(generics).map(Type::Named),
-        tick.and(ident).map(|(_, x)| Type::TypeVar(x)),
+        ident.map(Type::Var),
     ))
     .parse(input)?;
     let id = input.ctx.add_ty(ty);
@@ -415,7 +443,7 @@ fn arg(input: Input) -> Parsed<TypeId> {
         product_ty.map(Type::Product),
         delimited(left_round, function, right_round).map(Type::Function),
         ident.and(generics).map(Type::Named),
-        tick.and(ident).map(|(_, x)| Type::TypeVar(x)),
+        ident.map(Type::Var),
     ))
     .parse(input)?;
     let id = input.ctx.add_ty(ty);
@@ -423,19 +451,19 @@ fn arg(input: Input) -> Parsed<TypeId> {
 }
 
 fn base(input: Input) -> Parsed<ExprId> {
-    let (mut input, expr) = alt((
-        sum_expr.map(Expr::Sum),
-        product_expr.map(Expr::Product),
-        call.map(Expr::Call),
-        variant.map(Expr::Variant),
-        pmatch.map(Expr::Match),
-        ident.map(|x| Expr::Var(Some(x))),
-        tick.and(ident).map(|(_, x)| Expr::TypeVar(Some(x))),
-        tick.and(underscore).map(|_| Expr::TypeVar(None)),
-    ))
-    .parse(input)?;
-    let id = input.ctx.add_expr(expr);
-    Ok((input, id))
+    let inner = |input| {
+        let (mut input, expr) = alt((
+            sum_expr.map(Expr::Sum),
+            product_expr.map(Expr::Product),
+            call.map(Expr::Call),
+            variant.map(Expr::Variant),
+            pmatch.map(Expr::Match),
+        ))
+        .parse(input)?;
+        let id = input.ctx.add_expr(expr);
+        Ok((input, id))
+    };
+    inner.or(variable).parse(input)
 }
 
 enum Part {
@@ -481,8 +509,8 @@ fn pattern(input: Input) -> Parsed<ExprId> {
         sum_expr.map(Expr::Sum),
         product_expr.map(Expr::Product),
         variant.map(Expr::Variant),
-        ident.map(|x| Expr::Var(Some(x))),
-        underscore.map(|_| Expr::Var(None)),
+        ident.map(|x| Expr::Symbol((x, Vec::new()))),
+        underscore.map(|_| Expr::Ignore),
     ))
     .parse(input)?;
     let id = input.ctx.add_expr(expr);
@@ -490,67 +518,99 @@ fn pattern(input: Input) -> Parsed<ExprId> {
 }
 
 fn _expr(input: Input) -> Parsed<ExprId> {
-    let (mut input, expr) = alt((
-        lambda.map(Expr::Lambda),
-        sum_expr.map(Expr::Sum),
-        block.map(Expr::Block),
-        product_expr.map(Expr::Product),
-        call.map(Expr::Call),
-        variant.map(Expr::Variant),
-        pmatch.map(Expr::Match),
-        keyword("unreachable").map(|_| Expr::Unreachable),
-        ident.map(|x| Expr::Var(Some(x))),
-        underscore.map(|_| Expr::Var(None)),
-        int.map(Expr::Int),
-        decimal.map(Expr::Decimal),
-        tick.and(ident).map(|(_, x)| Expr::TypeVar(Some(x))),
-        tick.and(underscore).map(|_| Expr::TypeVar(None)),
-    ))
-    .parse(input)?;
-    let id = input.ctx.add_expr(expr);
-    Ok((input, id))
+    let inner = |input| {
+        let (mut input, expr) = alt((
+            lambda.map(Expr::Lambda),
+            sum_expr.map(Expr::Sum),
+            block.map(Expr::Block),
+            product_expr.map(Expr::Product),
+            call.map(Expr::Call),
+            variant.map(Expr::Variant),
+            pmatch.map(Expr::Match),
+            keyword("unreachable").map(|_| Expr::Unreachable),
+            int.map(Expr::Int),
+            decimal.map(Expr::Decimal),
+        ))
+        .parse(input)?;
+        let id = input.ctx.add_expr(expr);
+        Ok((input, id))
+    };
+    inner.or(variable).parse(input)
 }
 
 fn expr(input: Input) -> Parsed<ExprId> {
     complex_expr.or(_expr).parse(input)
 }
 
-fn fdecl(input: Input) -> Parsed<(String, ExprId)> {
+fn fdecl(input: Input) -> Parsed<Decl> {
     let Token::Identifier(x) = input.tokens[0].clone() else {
         return Err(Err::Error(Error {
             kind: ErrorKind::MissingIdent,
             next: None,
         }));
     };
-    let (mut input, branches) = many1(
-        keyword(&x)
-            .and(lambda)
-            .and(semicolon)
-            .map(|((_, function), _)| function),
-    )
-    .parse(input)?;
-    let x1 = input.ctx.add_expr(Expr::Var(Some("x".to_string())));
-    let x2 = input.ctx.add_expr(Expr::Var(Some("x".to_string())));
+    let (mut input, ((ident, generics, ty), branches)) = tdecl
+        .and(many1(
+            keyword(&x)
+                .and(lambda)
+                .and(semicolon)
+                .map(|((_, function), _)| function),
+        ))
+        .parse(input)?;
+    let Type::Function((arg, ret)) = input.ctx.types[ty] else {
+        return Err(Err::Error(Error {
+            kind: ErrorKind::MissingArrow,
+            next: None,
+        }));
+    };
+
+    let arg_expr = input.ctx.add_expr(Expr::Arg);
+    input.scopes.last_mut().unwrap().0.push(Decl {
+        ident: "x".to_string(),
+        generics: Vec::new(),
+        ty: arg,
+        value: Some(arg_expr),
+    });
+
+    let x = input.ctx.add_expr(Expr::Var((arg_expr, arg)));
     let branches = branches
         .into_iter()
         .map(|branch| input.ctx.add_expr(Expr::Lambda(branch)))
         .collect();
-    let m = input.ctx.add_expr(Expr::Match((x1, branches)));
-    let function = input.ctx.add_expr(Expr::Lambda((x2, m)));
-    Ok((input, (x, function)))
+    let m = input.ctx.add_expr(Expr::Match((x, branches)));
+    let function = input.ctx.add_expr(Expr::Lambda((arg_expr, m)));
+    Ok((
+        input,
+        Decl {
+            ident,
+            generics,
+            ty,
+            value: Some(function),
+        },
+    ))
 }
 
 fn generics(input: Input) -> Parsed<Vec<String>> {
     opt(delimited(
         left_angle,
-        separated_list1(comma, tick.and(ident).map(|(_, x)| x)),
+        separated_list1(comma, ident),
         right_angle,
     ))
     .map(|x| x.unwrap_or_default())
     .parse(input)
 }
 
-fn decl(input: Input) -> Parsed<Decl> {
+fn tdecl(input: Input) -> Parsed<(String, Vec<String>, TypeId)> {
+    ident
+        .and(generics)
+        .and(double_colon)
+        .and(ty)
+        .and(semicolon)
+        .map(|((((ident, generics), _), ty), _)| (ident, generics, ty))
+        .parse(input)
+}
+
+fn decl(input: Input) -> Parsed<()> {
     let combined = ident
         .and(generics)
         .and(colon)
@@ -565,37 +625,35 @@ fn decl(input: Input) -> Parsed<Decl> {
             value: Some(value),
         });
 
-    let tdecl = ident
-        .and(generics)
-        .and(double_colon)
-        .and(ty)
-        .and(semicolon)
-        .map(|((((ident, generics), _), ty), _)| (ident, generics, ty));
     let vdecl = ident
         .and(equals)
         .and(expr)
         .and(semicolon)
         .map(|(((ident, _), value), _)| (ident, value));
 
-    let split = tdecl.and(opt(vdecl.or(fdecl))).map(|(tdecl, vdecl)| Decl {
+    let split = tdecl.and(opt(vdecl)).map(|(tdecl, vdecl)| Decl {
         ident: tdecl.0,
         generics: tdecl.1,
         ty: tdecl.2,
         value: vdecl.map(|x| x.1),
     });
 
-    combined.or(split).parse(input)
+    let (mut input, decl) = combined.or(split).or(fdecl).parse(input)?;
+    input.scopes.last_mut().unwrap().0.push(decl);
+    Ok((input, ()))
 }
 
 pub fn parse_tokens(tokens: &[Token]) -> Option<(Context, Vec<Decl>)> {
-    let (input, decls) = many0(decl)
+    let (input, block) = block
         .parse(Input {
             ctx: Context {
                 exprs: Vec::new(),
                 types: Vec::new(),
             },
+            scopes: Vec::new(),
             tokens,
         })
-        .ok()?;
-    Some((input.ctx, decls))
+        .unwrap();
+    //.ok()?;
+    Some((input.ctx, block.0))
 }
