@@ -77,10 +77,315 @@ impl<'a> ParseError<Input<'a>> for Error {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct InstId(pub usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StringId(pub usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BlockId(pub usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TypeId(pub usize);
+
+impl TypeId {
+    pub const UNIT: Self = TypeId(0);
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Opcode {
+    Product,
+    Variant,
+    Get,
+    Call,
+    Branch,
+    Match,
+    Int,
+    As,
+    Field,
+    Return,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Operand {
+    Value(InstId),
+    Ident(StringId),
+    Arg,
+    Index(usize),
+    Block(BlockId),
+    Type(TypeId),
+}
+
+impl Operand {
+    pub fn to_value(self) -> Option<InstId> {
+        match self {
+            Self::Value(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn to_block(self) -> Option<BlockId> {
+        match self {
+            Self::Block(x) => Some(x),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Inst {
+    pub op: Opcode,
+    pub args: Vec<Operand>,
+}
+
+#[derive(Clone, Debug, Copy)]
+pub struct Symbol {
+    pub ty: Option<TypeId>,
+    pub value: Option<Operand>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Block {
+    pub arg: Option<TypeId>,
+    pub insts: Vec<InstId>,
+    pub symbols: HashMap<StringId, Symbol>,
+    pub blocks: Vec<BlockId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Type {
+    Product(Vec<(StringId, TypeId)>),
+    Sum(Vec<(StringId, TypeId)>),
+    Function((TypeId, TypeId)),
+    Symbol(StringId),
+}
+
+#[derive(Clone, Debug)]
+pub struct Context {
+    pub insts: Vec<Inst>,
+    pub strings: Vec<String>,
+    pub blocks: Vec<Block>,
+    pub types: Vec<Type>,
+    pub block: BlockId,
+}
+
+impl Context {
+    pub fn new() -> Self {
+        Self {
+            insts: Vec::new(),
+            strings: Vec::new(),
+            blocks: vec![Block {
+                arg: Some(TypeId(0)),
+                insts: Vec::new(),
+                symbols: HashMap::new(),
+                blocks: Vec::new(),
+            }],
+            types: vec![Type::Product(Vec::new())],
+            block: BlockId(0),
+        }
+    }
+
+    pub fn add_inst(&mut self, inst: Inst) -> InstId {
+        self.insts.push(inst);
+        self.blocks[self.block.0]
+            .insts
+            .push(InstId(self.insts.len() - 1));
+        InstId(self.insts.len() - 1)
+    }
+
+    pub fn add_ty(&mut self, ty: Type) -> TypeId {
+        if let Some(index) = self.types.iter().position(|x| x == &ty) {
+            TypeId(index)
+        } else {
+            self.types.push(ty);
+            TypeId(self.types.len() - 1)
+        }
+    }
+
+    pub fn add_block(&mut self, arg: Option<TypeId>) -> BlockId {
+        let block = Block {
+            arg,
+            insts: Vec::new(),
+            symbols: HashMap::new(),
+            blocks: Vec::new(),
+        };
+        self.blocks.push(block);
+        let id = BlockId(self.blocks.len() - 1);
+        self.blocks[self.block.0].blocks.push(id);
+        id
+    }
+
+    pub fn add_string(&mut self, s: &str) -> StringId {
+        if let Some(index) = self.strings.iter().position(|x| x == &s) {
+            StringId(index)
+        } else {
+            self.strings.push(s.to_owned());
+            StringId(self.strings.len() - 1)
+        }
+    }
+
+    pub fn block(&self) -> &Block {
+        &self.blocks[self.block.0]
+    }
+
+    pub fn block_mut(&mut self) -> &mut Block {
+        &mut self.blocks[self.block.0]
+    }
+
+    fn display_operand(&self, oper: Operand) -> String {
+        match oper {
+            Operand::Type(ty) => todo!(),
+            Operand::Arg => "$".to_string(),
+            Operand::Value(id) => format!("%{}", id.0),
+            Operand::Ident(s) => self.strings[s.0].to_owned(),
+            Operand::Index(x) => format!("#{x}"),
+            Operand::Block(id) => format!(":{}", id.0),
+        }
+    }
+
+    fn display_ty(&self, ty: TypeId) -> String {
+        match &self.types[ty.0] {
+            Type::Product(fields) => {
+                format!(
+                    "{{{}}}",
+                    fields
+                        .iter()
+                        .map(|(label, ty)| format!(
+                            "{} {}",
+                            self.strings[label.0],
+                            self.display_ty(*ty)
+                        ))
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                )
+            }
+            Type::Sum(fields) => {
+                format!(
+                    "[{}]",
+                    fields
+                        .iter()
+                        .map(|(label, ty)| format!(
+                            "{} {}",
+                            self.strings[label.0],
+                            self.display_ty(*ty)
+                        ))
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                )
+            }
+            Type::Function((arg, ret)) => {
+                format!("{} -> {}", self.display_ty(*arg), self.display_ty(*ret))
+            }
+            Type::Symbol(s) => self.strings[s.0].clone(),
+        }
+    }
+
+    fn display_inst(&self, inst: InstId) -> String {
+        let symbol = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.symbols.iter().collect::<Vec<(&StringId, &Symbol)>>())
+            .find(|(_, symbol)| {
+                symbol
+                    .value
+                    .map(|oper| match oper {
+                        Operand::Value(x) => inst == x,
+                        _ => false,
+                    })
+                    .unwrap_or_default()
+            });
+
+        let symbol = symbol
+            .map(|(label, symbol)| {
+                format!(
+                    "// {}: {}",
+                    self.strings[label.0],
+                    symbol
+                        .ty
+                        .map(|x| self.display_ty(x))
+                        .unwrap_or_else(|| "inferred".to_owned())
+                )
+            })
+            .unwrap_or_default();
+
+        format!(
+            "%{} = {} {}\t{}",
+            inst.0,
+            format!("{:?}", self.insts[inst.0].op).to_uppercase(),
+            self.insts[inst.0]
+                .args
+                .iter()
+                .map(|x| self.display_operand(*x))
+                .collect::<Vec<String>>()
+                .join(" "),
+            symbol
+        )
+    }
+
+    fn display_block(&self, id: BlockId) -> String {
+        let symbol = self
+            .blocks
+            .iter()
+            .flat_map(|block| block.symbols.iter().collect::<Vec<(&StringId, &Symbol)>>())
+            .find(|(_, symbol)| {
+                symbol
+                    .value
+                    .map(|oper| match oper {
+                        Operand::Block(x) => id == x,
+                        _ => false,
+                    })
+                    .unwrap_or_default()
+            });
+
+        let symbol = symbol
+            .map(|(label, symbol)| {
+                format!(
+                    "// {}: {}",
+                    self.strings[label.0],
+                    symbol
+                        .ty
+                        .map(|x| self.display_ty(x))
+                        .unwrap_or_else(|| "inferred".to_owned())
+                )
+            })
+            .unwrap_or_default();
+
+        let block = &self.blocks[id.0];
+        let insts = block
+            .insts
+            .iter()
+            .map(|inst| self.display_inst(*inst))
+            .collect::<Vec<String>>()
+            .join("\n");
+        let blocks = block
+            .blocks
+            .iter()
+            .map(|block| self.display_block(*block))
+            .collect::<Vec<String>>()
+            .join("\n");
+        format!(
+            ":{}({}) = {{\t{}\n{}\n}}",
+            id.0,
+            block
+                .arg
+                .map(|x| self.display_ty(x))
+                .unwrap_or_else(|| "inferred".to_string()),
+            symbol,
+            (insts + "\n" + &blocks)
+                .split('\n')
+                .filter(|x| !x.chars().all(|x| x.is_whitespace()))
+                .map(|x| format!("    {x}"))
+                .collect::<Vec<String>>()
+                .join("\n"),
+        )
+    }
+
+    pub fn display(&self) -> String {
+        self.display_block(BlockId(0))
+    }
+}
+
 #[derive(Clone)]
 pub struct Input<'a> {
     ctx: Context,
-    scopes: Vec<Block>,
     tokens: &'a [Token],
 }
 
@@ -88,7 +393,6 @@ impl<'a> Input<'a> {
     pub fn slice(self, range: RangeFrom<usize>) -> Self {
         Self {
             ctx: self.ctx,
-            scopes: Vec::new(),
             tokens: &self.tokens[range],
         }
     }
@@ -102,35 +406,26 @@ impl<'a> nom::InputLength for Input<'a> {
 
 pub type Parsed<'a, T> = IResult<Input<'a>, T, Error>;
 
-fn ident(input: Input) -> Parsed<String> {
-    match input.tokens.first() {
-        Some(Token::Identifier(ident)) => Ok((input.slice(1..), ident.clone())),
-        _ => Err(Err::Error(Error {
-            kind: ErrorKind::MissingIdent,
-            next: None,
-        })),
-    }
+macro_rules! tok_parser_body {
+    ($n:ident, $i:ident, $e:ident) => {
+        fn $n(mut input: Input) -> Parsed<StringId> {
+            match input.tokens.first() {
+                Some(Token::$i(x)) => {
+                    let x = input.ctx.add_string(x);
+                    Ok((input.slice(1..), x))
+                }
+                _ => Err(Err::Error(Error {
+                    kind: ErrorKind::$e,
+                    next: None,
+                })),
+            }
+        }
+    };
 }
 
-fn int(input: Input) -> Parsed<String> {
-    match input.tokens.first() {
-        Some(Token::Integer(int)) => Ok((input.slice(1..), int.clone())),
-        _ => Err(Err::Error(Error {
-            kind: ErrorKind::MissingInteger,
-            next: None,
-        })),
-    }
-}
-
-fn decimal(input: Input) -> Parsed<String> {
-    match input.tokens.first() {
-        Some(Token::Decimal(int)) => Ok((input.slice(1..), int.clone())),
-        _ => Err(Err::Error(Error {
-            kind: ErrorKind::MissingDecimal,
-            next: None,
-        })),
-    }
-}
+tok_parser_body!(ident, Identifier, MissingIdent);
+tok_parser_body!(int, Integer, MissingInteger);
+tok_parser_body!(decimal, Decimal, MissingDecimal);
 
 macro_rules! tok_parser {
     ($n:ident, $p:pat, $e:ident) => {
@@ -166,494 +461,212 @@ tok_parser!(tick, Token::Tick, MissingTick);
 tok_parser!(left_angle, Token::LeftAngle, MissingLeftAngle);
 tok_parser!(right_angle, Token::RightAngle, MissingRightAngle);
 
-fn path(input: Input) -> Parsed<Vec<String>> {
-    separated_list1(double_colon, ident).parse(input)
-}
-
-pub type ExprId = usize;
-pub type TypeId = usize;
-#[derive(Clone, Debug)]
-pub struct Sum<T>(pub Vec<(String, T)>);
-#[derive(Clone, Debug)]
-pub struct Product<T>(pub Vec<(String, T)>);
-pub type Call = (String, ExprId);
-pub type Function = (TypeId, TypeId);
-pub type Lambda = (ExprId, ExprId);
-pub type Match = (ExprId, Vec<ExprId>);
-pub type Access = (ExprId, String);
-pub type Variant = (String, ExprId);
-pub type Block = (Vec<Decl>, Option<ExprId>);
-
-#[derive(Clone, Debug)]
-pub enum Expr {
-    Arg,
-    Sum(Sum<ExprId>),
-    Product(Product<ExprId>),
-    Call(Call),
-    Lambda(Lambda),
-    Match(Match),
-    Access(Access),
-    Unreachable,
-    Ignore,
-    Var((ExprId, TypeId)),
-    Symbol((String, Vec<String>)),
-    Int(String),
-    Decimal(String),
-    TypeVar(Option<String>),
-    Variant(Variant),
-    Block(Block),
-}
-
-#[derive(Clone, Debug)]
-pub enum Type {
-    Sum(Sum<TypeId>),
-    Product(Product<TypeId>),
-    Function(Function),
-    Named((String, Vec<String>)),
-    Var(String),
-}
-
-#[derive(Clone, Debug)]
-pub struct Decl {
-    pub ident: String,
-    pub generics: Vec<String>,
-    pub ty: TypeId,
-    pub value: Option<ExprId>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Context {
-    pub exprs: Vec<Expr>,
-    pub types: Vec<Type>,
-}
-
-impl Context {
-    pub fn add_expr(&mut self, expr: Expr) -> ExprId {
-        self.exprs.push(expr);
-        self.exprs.len() - 1
-    }
-
-    pub fn add_ty(&mut self, ty: Type) -> ExprId {
-        self.types.push(ty);
-        self.types.len() - 1
-    }
-}
-
-fn variable(input: Input) -> Parsed<ExprId> {
-    let (mut input, (ident, generics)) = ident.and(generics).parse(input)?;
-    let expr = if let Some(decl) = input
-        .scopes
-        .last()
-        .unwrap()
-        .0
-        .iter()
-        .find(|d| d.ident == ident)
-    {
-        Expr::Var((decl.value.expect("referenced decl with no value"), decl.ty))
-    } else {
-        Expr::Symbol((ident, generics))
-    };
-    let expr = input.ctx.add_expr(expr);
-    Ok((input, expr))
-}
-
-fn sum_expr(input: Input) -> Parsed<Sum<ExprId>> {
+fn product_ty(input: Input) -> Parsed<Type> {
     delimited(
-        left_square,
-        separated_list1(comma, ident.and(expr)),
-        right_square,
+        left_curly,
+        separated_list0(comma, int.or(ident).and(ty)),
+        right_curly,
     )
-    .map(Sum)
+    .map(Type::Product)
     .parse(input)
 }
 
-fn opt_ty(input: Input) -> Parsed<TypeId> {
-    let (mut input, ty) = opt(ty).parse(input)?;
-    if let Some(ty) = ty {
-        return Ok((input, ty));
-    }
-    let ty = input.ctx.add_ty(Type::Product(Product(Vec::new())));
-    Ok((input, ty))
-}
-
-fn sum_ty(input: Input) -> Parsed<Sum<TypeId>> {
+fn sum_ty(input: Input) -> Parsed<Type> {
     delimited(
         left_square,
-        separated_list1(comma, ident.and(opt_ty)),
+        separated_list1(comma, int.or(ident).and(ty)),
         right_square,
     )
-    .map(Sum)
+    .map(Type::Sum)
     .parse(input)
 }
 
-fn product_expr(input: Input) -> Parsed<Product<ExprId>> {
-    let labelled = delimited(
-        left_curly,
-        separated_list0(comma, ident.or(int).and(expr)),
-        right_curly,
-    )
-    .map(Product);
-
-    let unlabelled =
-        delimited(left_round, separated_list0(comma, expr), right_round).map(|exprs| {
-            Product(
-                exprs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, expr)| (i.to_string(), expr))
-                    .collect(),
-            )
-        });
-
-    labelled.or(unlabelled).parse(input)
-}
-
-fn product_ty(input: Input) -> Parsed<Product<TypeId>> {
-    let labelled = delimited(
-        left_curly,
-        separated_list0(comma, ident.or(int).and(ty)),
-        right_curly,
-    )
-    .map(Product);
-
-    let unlabelled = delimited(left_round, separated_list0(comma, ty), right_round).map(|exprs| {
-        Product(
-            exprs
-                .into_iter()
-                .enumerate()
-                .map(|(i, expr)| (i.to_string(), expr))
-                .collect(),
-        )
-    });
-
-    labelled.or(unlabelled).parse(input)
-}
-
-fn _call_single(input: Input) -> Parsed<Call> {
-    ident
-        .and(delimited(left_round, expr, right_round))
-        .parse(input)
-}
-
-fn _call_multiple(input: Input) -> Parsed<Call> {
-    let (mut input, (arg, exprs)) = ident
-        .and(delimited(
-            left_round,
-            separated_list0(comma, expr),
-            right_round,
-        ))
-        .parse(input)?;
-
-    let product = input.ctx.add_expr(Expr::Product(Product(
-        exprs
-            .into_iter()
-            .enumerate()
-            .map(|(i, expr)| (i.to_string(), expr))
-            .collect(),
-    )));
-    Ok((input, (arg, product)))
-}
-
-fn call(input: Input) -> Parsed<Call> {
-    _call_single.or(_call_multiple).parse(input)
-}
-
-fn function(input: Input) -> Parsed<Function> {
+fn function_ty(input: Input) -> Parsed<Type> {
     arg.and(arrow)
         .and(ty)
-        .map(|((x, _), y)| (x, y))
+        .map(|((arg, _), ret)| (arg, ret))
+        .map(Type::Function)
         .parse(input)
-}
-
-fn lambda(input: Input) -> Parsed<Lambda> {
-    pattern
-        .and(arrow)
-        .and(expr)
-        .map(|((x, _), y)| (x, y))
-        .parse(input)
-}
-
-fn keyword<T: ToString>(word: T) -> impl Fn(Input) -> Parsed<()> {
-    move |input| match input.tokens.first() {
-        Some(Token::Identifier(w)) if w == &word.to_string() => Ok((input.slice(1..), ())),
-        _ => Err(Err::Error(Error {
-            kind: ErrorKind::MissingKeyword(word.to_string()),
-            next: None,
-        })),
-    }
-}
-
-fn pmatch(input: Input) -> Parsed<Match> {
-    let (mut input, (expr, branches)) = keyword("match")
-        .and(expr)
-        .and(delimited(
-            left_curly,
-            separated_list1(comma, lambda),
-            right_curly,
-        ))
-        .map(|((_, x), y)| (x, y))
-        .parse(input)?;
-    let branches = branches
-        .into_iter()
-        .map(|branch| input.ctx.add_expr(Expr::Lambda(branch)))
-        .collect();
-    Ok((input, (expr, branches)))
-}
-
-fn variant(input: Input) -> Parsed<Variant> {
-    fn opt_expr(input: Input) -> Parsed<ExprId> {
-        let (mut input, expr) = opt(expr).parse(input)?;
-        let expr = match expr {
-            Some(expr) => expr,
-            None => input.ctx.add_expr(Expr::Product(Product(Vec::new()))),
-        };
-        Ok((input, expr))
-    }
-
-    ident
-        .and(delimited(left_square, opt_expr, right_square))
-        .parse(input)
-}
-
-fn block(mut input: Input) -> Parsed<Block> {
-    input.scopes.push((Vec::new(), None));
-    let (mut input, (_, expr)) =
-        delimited(left_curly, many0(decl).and(opt(expr)), right_curly).parse(input)?;
-    input.scopes.last_mut().unwrap().1 = expr;
-    let block = input.scopes.pop().unwrap();
-    Ok((input, block))
-}
-
-fn ty(input: Input) -> Parsed<TypeId> {
-    let (mut input, ty) = alt((
-        function.map(Type::Function),
-        sum_ty.map(Type::Sum),
-        product_ty.map(Type::Product),
-        ident.and(generics).map(Type::Named),
-        ident.map(Type::Var),
-    ))
-    .parse(input)?;
-    let id = input.ctx.add_ty(ty);
-    Ok((input, id))
 }
 
 fn arg(input: Input) -> Parsed<TypeId> {
     let (mut input, ty) = alt((
-        sum_ty.map(Type::Sum),
-        product_ty.map(Type::Product),
-        delimited(left_round, function, right_round).map(Type::Function),
-        ident.and(generics).map(Type::Named),
-        ident.map(Type::Var),
+        delimited(left_round, function_ty, right_round),
+        product_ty,
+        sum_ty,
+        ident.map(Type::Symbol),
     ))
     .parse(input)?;
-    let id = input.ctx.add_ty(ty);
-    Ok((input, id))
+    let ty = input.ctx.add_ty(ty);
+    Ok((input, ty))
 }
 
-fn base(input: Input) -> Parsed<ExprId> {
-    let inner = |input| {
-        let (mut input, expr) = alt((
-            sum_expr.map(Expr::Sum),
-            product_expr.map(Expr::Product),
-            call.map(Expr::Call),
-            variant.map(Expr::Variant),
-            pmatch.map(Expr::Match),
-        ))
-        .parse(input)?;
-        let id = input.ctx.add_expr(expr);
-        Ok((input, id))
-    };
-    inner.or(variable).parse(input)
+fn ty(input: Input) -> Parsed<TypeId> {
+    let (mut input, ty) =
+        alt((function_ty, product_ty, sum_ty, ident.map(Type::Symbol))).parse(input)?;
+    let ty = input.ctx.add_ty(ty);
+    Ok((input, ty))
 }
 
-enum Part {
-    Call(Call),
-    Access(String),
-}
-
-fn complex_expr(input: Input) -> Parsed<ExprId> {
-    let (mut input, (base, parts)) = base
-        .and(dot)
-        .and(separated_list1(
-            dot,
-            call.map(Part::Call).or(int.or(ident).map(Part::Access)),
-        ))
-        .map(|((expr, _), parts)| (expr, parts))
-        .parse(input)?;
-
-    let id = parts.into_iter().fold(base, |expr, part| match part {
-        Part::Call((func, arg)) => {
-            let arg = if let Expr::Product(Product(fields)) = &mut input.ctx.exprs[arg] {
-                *fields = [expr]
-                    .iter()
-                    .chain(fields.iter().map(|(_, x)| x))
-                    .enumerate()
-                    .map(|(i, field)| (i.to_string(), *field))
-                    .collect();
-                arg
-            } else {
-                input.ctx.add_expr(Expr::Product(Product(vec![
-                    ("0".to_string(), expr),
-                    ("1".to_string(), arg),
-                ])))
-            };
-            input.ctx.add_expr(Expr::Call((func, arg)))
-        }
-        Part::Access(field) => input.ctx.add_expr(Expr::Access((expr, field))),
-    });
-    Ok((input, id))
-}
-
-fn pattern(input: Input) -> Parsed<ExprId> {
-    let (mut input, expr) = alt((
-        sum_expr.map(Expr::Sum),
-        product_expr.map(Expr::Product),
-        variant.map(Expr::Variant),
-        ident.map(|x| Expr::Symbol((x, Vec::new()))),
-        underscore.map(|_| Expr::Ignore),
-    ))
-    .parse(input)?;
-    let id = input.ctx.add_expr(expr);
-    Ok((input, id))
-}
-
-fn _expr(input: Input) -> Parsed<ExprId> {
-    let inner = |input| {
-        let (mut input, expr) = alt((
-            lambda.map(Expr::Lambda),
-            sum_expr.map(Expr::Sum),
-            block.map(Expr::Block),
-            product_expr.map(Expr::Product),
-            call.map(Expr::Call),
-            variant.map(Expr::Variant),
-            pmatch.map(Expr::Match),
-            keyword("unreachable").map(|_| Expr::Unreachable),
-            int.map(Expr::Int),
-            decimal.map(Expr::Decimal),
-        ))
-        .parse(input)?;
-        let id = input.ctx.add_expr(expr);
-        Ok((input, id))
-    };
-    inner.or(variable).parse(input)
-}
-
-fn expr(input: Input) -> Parsed<ExprId> {
-    complex_expr.or(_expr).parse(input)
-}
-
-fn fdecl(input: Input) -> Parsed<Decl> {
-    let Token::Identifier(x) = input.tokens[0].clone() else {
-        return Err(Err::Error(Error {
-            kind: ErrorKind::MissingIdent,
-            next: None,
-        }));
-    };
-    let (mut input, ((ident, generics, ty), branches)) = tdecl
-        .and(many1(
-            keyword(&x)
-                .and(lambda)
-                .and(semicolon)
-                .map(|((_, function), _)| function),
-        ))
-        .parse(input)?;
-    let Type::Function((arg, ret)) = input.ctx.types[ty] else {
-        return Err(Err::Error(Error {
-            kind: ErrorKind::MissingArrow,
-            next: None,
-        }));
-    };
-
-    let arg_expr = input.ctx.add_expr(Expr::Arg);
-    input.scopes.last_mut().unwrap().0.push(Decl {
-        ident: "x".to_string(),
-        generics: Vec::new(),
-        ty: arg,
-        value: Some(arg_expr),
-    });
-
-    let x = input.ctx.add_expr(Expr::Var((arg_expr, arg)));
-    let branches = branches
-        .into_iter()
-        .map(|branch| input.ctx.add_expr(Expr::Lambda(branch)))
-        .collect();
-    let m = input.ctx.add_expr(Expr::Match((x, branches)));
-    let function = input.ctx.add_expr(Expr::Lambda((arg_expr, m)));
-    Ok((
-        input,
-        Decl {
-            ident,
-            generics,
-            ty,
-            value: Some(function),
-        },
-    ))
-}
-
-fn generics(input: Input) -> Parsed<Vec<String>> {
-    opt(delimited(
-        left_angle,
-        separated_list1(comma, ident),
-        right_angle,
-    ))
-    .map(|x| x.unwrap_or_default())
-    .parse(input)
-}
-
-fn tdecl(input: Input) -> Parsed<(String, Vec<String>, TypeId)> {
-    ident
-        .and(generics)
+fn tdecl(input: Input) -> Parsed<()> {
+    let (mut input, (ident, ty)) = ident
         .and(double_colon)
         .and(ty)
         .and(semicolon)
-        .map(|((((ident, generics), _), ty), _)| (ident, generics, ty))
-        .parse(input)
-}
+        .map(|(((ident, _), ty), _)| (ident, ty))
+        .parse(input)?;
 
-fn decl(input: Input) -> Parsed<()> {
-    let combined = ident
-        .and(generics)
-        .and(colon)
-        .and(ty)
-        .and(equals)
-        .and(expr)
-        .and(semicolon)
-        .map(|((((((ident, generics), _), ty), _), value), _)| Decl {
-            ident,
-            generics,
-            ty,
-            value: Some(value),
-        });
+    input.ctx.block_mut().symbols.insert(
+        ident,
+        Symbol {
+            ty: Some(ty),
+            value: None,
+        },
+    );
 
-    let vdecl = ident
-        .and(equals)
-        .and(expr)
-        .and(semicolon)
-        .map(|(((ident, _), value), _)| (ident, value));
-
-    let split = tdecl.and(opt(vdecl)).map(|(tdecl, vdecl)| Decl {
-        ident: tdecl.0,
-        generics: tdecl.1,
-        ty: tdecl.2,
-        value: vdecl.map(|x| x.1),
-    });
-
-    let (mut input, decl) = combined.or(split).or(fdecl).parse(input)?;
-    input.scopes.last_mut().unwrap().0.push(decl);
     Ok((input, ()))
 }
 
-pub fn parse_tokens(tokens: &[Token]) -> Option<(Context, Vec<Decl>)> {
-    let (input, block) = block
-        .parse(Input {
-            ctx: Context {
-                exprs: Vec::new(),
-                types: Vec::new(),
-            },
-            scopes: Vec::new(),
-            tokens,
-        })
-        .unwrap();
-    //.ok()?;
-    Some((input.ctx, block.0))
+fn call(input: Input) -> Parsed<Operand> {
+    let (mut input, (ident, arg)) = ident
+        .and(delimited(left_round, expr, right_round))
+        .parse(input)?;
+    let inst = input.ctx.add_inst(Inst {
+        op: Opcode::Call,
+        args: vec![Operand::Ident(ident), arg],
+    });
+    Ok((input, Operand::Value(inst)))
+}
+
+fn variable(input: Input) -> Parsed<Operand> {
+    let (input, ident) = ident.parse(input)?;
+    let oper = if let Some(Symbol {
+        value: Some(oper), ..
+    }) = input.ctx.block().symbols.get(&ident).copied()
+    {
+        oper
+    } else {
+        Operand::Ident(ident)
+    };
+    Ok((input, oper))
+}
+
+fn constant(input: Input) -> Parsed<Operand> {
+    let (mut input, int) = int.parse(input)?;
+    let inst = input.ctx.add_inst(Inst {
+        op: Opcode::Int,
+        args: vec![Operand::Ident(int)],
+    });
+    Ok((input, Operand::Value(inst)))
+}
+
+fn product(input: Input) -> Parsed<Operand> {
+    let (mut input, fields) = delimited(
+        left_curly,
+        separated_list0(comma, int.or(ident).and(expr)),
+        right_curly,
+    )
+    .parse(input)?;
+    let inst = Inst {
+        op: Opcode::Product,
+        args: fields
+            .into_iter()
+            .map(|(ident, oper)| {
+                input.ctx.add_inst(Inst {
+                    op: Opcode::Field,
+                    args: vec![Operand::Ident(ident), oper],
+                })
+            })
+            .map(Operand::Value)
+            .collect(),
+    };
+    let inst = input.ctx.add_inst(inst);
+    Ok((input, Operand::Value(inst)))
+}
+
+fn variant(input: Input) -> Parsed<Operand> {
+    let (mut input, (variant, oper)) = ident
+        .and(delimited(left_square, expr, right_square))
+        .parse(input)?;
+    let inst = input.ctx.add_inst(Inst {
+        op: Opcode::Variant,
+        args: vec![Operand::Ident(variant), oper],
+    });
+    Ok((input, Operand::Value(inst)))
+}
+
+fn expr(input: Input) -> Parsed<Operand> {
+    alt((lambda, product, variant, call, access, variable, constant)).parse(input)
+}
+
+fn lambda(mut input: Input) -> Parsed<Operand> {
+    let parent = input.ctx.block;
+    let block = input.ctx.add_block(None);
+    input.ctx.block = block;
+
+    let (mut input, (arg, _)) = ident.and(arrow).parse(input)?;
+    input.ctx.block_mut().symbols.insert(
+        arg,
+        Symbol {
+            ty: None,
+            value: Some(Operand::Arg),
+        },
+    );
+
+    let (mut input, value) = expr.parse(input)?;
+    input.ctx.add_inst(Inst {
+        op: Opcode::Return,
+        args: vec![value],
+    });
+    input.ctx.block = parent;
+    Ok((input, Operand::Block(block)))
+}
+
+fn access(input: Input) -> Parsed<Operand> {
+    let (mut input, ((base, _), fields)) = variable
+        .and(dot)
+        .and(separated_list1(dot, int.or(ident)))
+        .parse(input)?;
+
+    let inst = fields.into_iter().fold(base, |oper, field| {
+        Operand::Value(input.ctx.add_inst(Inst {
+            op: Opcode::Get,
+            args: vec![oper, Operand::Ident(field)],
+        }))
+    });
+    Ok((input, inst))
+}
+
+fn vdecl(mut input: Input) -> Parsed<()> {
+    let parent = input.ctx.block;
+    let block = input.ctx.add_block(Some(TypeId::UNIT));
+    input.ctx.block = block;
+
+    let (mut input, (((ident, _), value), _)) =
+        ident.and(equals).and(expr).and(semicolon).parse(input)?;
+
+    input.ctx.add_inst(Inst {
+        op: Opcode::Return,
+        args: vec![value],
+    });
+
+    input.ctx.block = parent;
+    input
+        .ctx
+        .block_mut()
+        .symbols
+        .get_mut(&ident)
+        .expect("Value decl without type hint")
+        .value = Some(Operand::Block(block));
+
+    Ok((input, ()))
+}
+
+pub fn parse_tokens(tokens: &[Token]) -> Option<Context> {
+    let input = Input {
+        tokens,
+        ctx: Context::new(),
+    };
+    let (input, parsed) = many0(tdecl.or(vdecl)).parse(input).unwrap();
+    Some(input.ctx)
 }
