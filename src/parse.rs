@@ -88,6 +88,7 @@ pub struct TypeId(pub usize);
 
 impl TypeId {
     pub const UNIT: Self = TypeId(0);
+    pub const INT: Self = TypeId(1);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -100,8 +101,6 @@ pub enum Opcode {
     Match,
     Int,
     As,
-    Field,
-    Return,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,6 +124,20 @@ impl Operand {
     pub fn to_block(self) -> Option<BlockId> {
         match self {
             Self::Block(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn to_ident(self) -> Option<StringId> {
+        match self {
+            Self::Ident(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn to_ty(self) -> Option<TypeId> {
+        match self {
+            Self::Type(x) => Some(x),
             _ => None,
         }
     }
@@ -152,10 +165,61 @@ pub struct Block {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
-    Product(Vec<(StringId, TypeId)>),
+    Labelled(Vec<(StringId, TypeId)>),
+    Unlabelled(Vec<TypeId>),
     Sum(Vec<(StringId, TypeId)>),
     Function((TypeId, TypeId)),
     Symbol(StringId),
+    ConstInt,
+}
+
+impl Type {
+    pub fn as_labelled(&self) -> Option<&[(StringId, TypeId)]> {
+        match self {
+            Self::Labelled(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn as_unlabelled(&self) -> Option<&[TypeId]> {
+        match self {
+            Self::Unlabelled(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn as_sum(&self) -> Option<&[(StringId, TypeId)]> {
+        match self {
+            Self::Sum(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn as_fn(&self) -> Option<(TypeId, TypeId)> {
+        match self {
+            Self::Function(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn as_sym(&self) -> Option<StringId> {
+        match self {
+            Self::Symbol(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn resolve_shallow<'a>(&'a self, ctx: &'a Context) -> &'a Type {
+        match self {
+            Type::Symbol(symbol) => {
+                &ctx.types[ctx
+                    .symbols()
+                    .find_map(|(s, sy)| if s == *symbol { sy.ty } else { None })
+                    .unwrap_or_else(|| panic!("Cannot find type {}", ctx.strings[symbol.0]))
+                    .0]
+            }
+            x => x,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +229,7 @@ pub struct Context {
     pub blocks: Vec<Block>,
     pub types: Vec<Type>,
     pub block: BlockId,
+    pub inst_types: Option<Vec<Option<TypeId>>>,
 }
 
 impl Context {
@@ -178,8 +243,9 @@ impl Context {
                 symbols: HashMap::new(),
                 blocks: Vec::new(),
             }],
-            types: vec![Type::Product(Vec::new())],
+            types: vec![Type::Unlabelled(Vec::new()), Type::ConstInt],
             block: BlockId(0),
+            inst_types: None,
         }
     }
 
@@ -230,12 +296,19 @@ impl Context {
         &mut self.blocks[self.block.0]
     }
 
+    pub fn symbols(&self) -> impl Iterator<Item = (StringId, Symbol)> + '_ {
+        self.blocks
+            .iter()
+            .flat_map(|blocks| blocks.symbols.iter())
+            .map(|(s, sy)| (*s, *sy))
+    }
+
     fn display_operand(&self, oper: Operand) -> String {
         match oper {
-            Operand::Type(ty) => todo!(),
+            Operand::Type(ty) => format!("<{}>", self.display_ty(ty)),
             Operand::Arg => "$".to_string(),
             Operand::Value(id) => format!("%{}", id.0),
-            Operand::Ident(s) => self.strings[s.0].to_owned(),
+            Operand::Ident(s) => format!("\"{}\"", self.strings[s.0]),
             Operand::Index(x) => format!("#{x}"),
             Operand::Block(id) => format!(":{}", id.0),
         }
@@ -243,7 +316,7 @@ impl Context {
 
     fn display_ty(&self, ty: TypeId) -> String {
         match &self.types[ty.0] {
-            Type::Product(fields) => {
+            Type::Labelled(fields) => {
                 format!(
                     "{{{}}}",
                     fields
@@ -253,6 +326,16 @@ impl Context {
                             self.strings[label.0],
                             self.display_ty(*ty)
                         ))
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                )
+            }
+            Type::Unlabelled(fields) => {
+                format!(
+                    "({})",
+                    fields
+                        .iter()
+                        .map(|ty| self.display_ty(*ty))
                         .collect::<Vec<String>>()
                         .join(", ")
                 )
@@ -275,31 +358,18 @@ impl Context {
                 format!("{} -> {}", self.display_ty(*arg), self.display_ty(*ret))
             }
             Type::Symbol(s) => self.strings[s.0].clone(),
+            Type::ConstInt => "int".to_string(),
         }
     }
 
     fn display_inst(&self, inst: InstId) -> String {
-        let symbol = self
-            .blocks
-            .iter()
-            .flat_map(|block| block.symbols.iter().collect::<Vec<(&StringId, &Symbol)>>())
-            .find(|(_, symbol)| {
-                symbol
-                    .value
-                    .map(|oper| match oper {
-                        Operand::Value(x) => inst == x,
-                        _ => false,
-                    })
-                    .unwrap_or_default()
-            });
-
-        let symbol = symbol
-            .map(|(label, symbol)| {
+        let ty = self
+            .inst_types
+            .as_ref()
+            .map(|x| {
                 format!(
-                    "// {}: {}",
-                    self.strings[label.0],
-                    symbol
-                        .ty
+                    "\t// {}",
+                    x[inst.0]
                         .map(|x| self.display_ty(x))
                         .unwrap_or_else(|| "inferred".to_owned())
                 )
@@ -316,24 +386,20 @@ impl Context {
                 .map(|x| self.display_operand(*x))
                 .collect::<Vec<String>>()
                 .join(" "),
-            symbol
+            ty
         )
     }
 
     fn display_block(&self, id: BlockId) -> String {
-        let symbol = self
-            .blocks
-            .iter()
-            .flat_map(|block| block.symbols.iter().collect::<Vec<(&StringId, &Symbol)>>())
-            .find(|(_, symbol)| {
-                symbol
-                    .value
-                    .map(|oper| match oper {
-                        Operand::Block(x) => id == x,
-                        _ => false,
-                    })
-                    .unwrap_or_default()
-            });
+        let symbol = self.symbols().find(|(_, symbol)| {
+            symbol
+                .value
+                .map(|oper| match oper {
+                    Operand::Block(x) => id == x,
+                    _ => false,
+                })
+                .unwrap_or_default()
+        });
 
         let symbol = symbol
             .map(|(label, symbol)| {
@@ -467,7 +533,7 @@ fn product_ty(input: Input) -> Parsed<Type> {
         separated_list0(comma, int.or(ident).and(ty)),
         right_curly,
     )
-    .map(Type::Product)
+    .map(Type::Labelled)
     .parse(input)
 }
 
@@ -571,13 +637,8 @@ fn product(input: Input) -> Parsed<Operand> {
         op: Opcode::Product,
         args: fields
             .into_iter()
-            .map(|(ident, oper)| {
-                input.ctx.add_inst(Inst {
-                    op: Opcode::Field,
-                    args: vec![Operand::Ident(ident), oper],
-                })
-            })
-            .map(Operand::Value)
+            .map(|(s, oper)| [Operand::Ident(s), oper])
+            .flatten()
             .collect(),
     };
     let inst = input.ctx.add_inst(inst);
@@ -614,10 +675,6 @@ fn lambda(mut input: Input) -> Parsed<Operand> {
     );
 
     let (mut input, value) = expr.parse(input)?;
-    input.ctx.add_inst(Inst {
-        op: Opcode::Return,
-        args: vec![value],
-    });
     input.ctx.block = parent;
     Ok((input, Operand::Block(block)))
 }
@@ -645,9 +702,15 @@ fn vdecl(mut input: Input) -> Parsed<()> {
     let (mut input, (((ident, _), value), _)) =
         ident.and(equals).and(expr).and(semicolon).parse(input)?;
 
-    input.ctx.add_inst(Inst {
-        op: Opcode::Return,
-        args: vec![value],
+    let ty = input.ctx.blocks[parent.0]
+        .symbols
+        .get(&ident)
+        .expect("Value decl without type hint")
+        .ty
+        .unwrap();
+    let value = input.ctx.add_inst(Inst {
+        op: Opcode::As,
+        args: vec![Operand::Type(ty), value],
     });
 
     input.ctx.block = parent;
