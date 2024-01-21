@@ -1,3 +1,5 @@
+#![feature(try_trait_v2)]
+
 use ir::{
     arith::{addi, int},
     func::func,
@@ -6,28 +8,20 @@ use ir::{
 use lex::tokenize;
 use parse::parse_tokens;
 
-use crate::{
-    ir::{func::ret, Type},
-    opt::{infer, remove_redundant_blocks},
-};
+use crate::ir::{func::ret, Type};
 
 mod ir;
 mod lex;
-mod opt;
+//mod opt;
 mod parse;
 
 fn main() {
-    /*
     let file = String::from_utf8(std::fs::read("test.tea").unwrap()).unwrap();
     let tokens = tokenize(&file);
-    let mut ctx = parse_tokens(&tokens).unwrap();
-    remove_redundant_blocks(&mut ctx);
-    //resolve(&mut ctx);
-    infer(&mut ctx);
-    //println!("{ctx:#?}");
-    println!("{}", ctx.display());
-    */
+    let mut ir = parse_tokens(&tokens).unwrap();
+    println!("{}", ir.display());
 
+    /*
     let mut ir = IR::new();
     let region = ir.new_region();
     let label = ir.add_string("test");
@@ -47,4 +41,5 @@ fn main() {
     func(&mut ir, None, main, region, Some(main_ty));
     println!("{:?}", res);
     println!("{}", ir.display());
+    */
 }
