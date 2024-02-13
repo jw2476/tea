@@ -6,7 +6,11 @@ use std::{
 };
 
 use crate::{
-    ir::{func, types, BlockId, Decl, OpId, RegionId, StringId, Type, TypeId, Value, IR},
+    ir::{
+        func,
+        types::{self, variant},
+        BlockId, Decl, OpId, RegionId, StringId, Type, TypeId, Value, IR,
+    },
     lex::Token,
 };
 
@@ -14,7 +18,7 @@ use crate::{
 pub struct Input<'a> {
     tokens: &'a [Token],
     ir: IR,
-    symbols: HashMap<StringId, Value>,
+    symbols: Vec<(StringId, Value)>,
 }
 
 pub enum Parsed<I, A> {
@@ -332,15 +336,19 @@ fn keyword_ty(input: Input) -> Parsed<Input, TypeId> {
 fn tuple_ty(input: Input) -> Parsed<Input, TypeId> {
     let (mut input, ty) = delimited(left_round, separated_list0(ty, comma), right_round)
         .parse(input)
-        .map(|fields| Type::Product(fields.into_iter().map(Some).collect()))?;
+        .map(Type::Product)?;
     let id = input.ir.add_ty(ty);
     Parsed::Some(input, id)
 }
 
 fn sum_ty(input: Input) -> Parsed<Input, TypeId> {
-    let (mut input, ty) = delimited(left_square, separated_list0(ty, pipe), right_square)
-        .parse(input)
-        .map(|variants| Type::Sum(variants.into_iter().map(Some).collect()))?;
+    let (mut input, ty) = delimited(
+        left_square,
+        separated_list0(ident.and(ty), pipe),
+        right_square,
+    )
+    .parse(input)
+    .map(Type::Sum)?;
     let id = input.ir.add_ty(ty);
     Parsed::Some(input, id)
 }
@@ -350,7 +358,7 @@ fn function_ty(input: Input) -> Parsed<Input, TypeId> {
         .and(arrow)
         .and(ty)
         .parse(input)
-        .map(|((arg, _), ret)| Type::Function(Some(arg), Some(ret)))?;
+        .map(|((arg, _), ret)| Type::Function(arg, ret))?;
     let id = input.ir.add_ty(ty);
     Parsed::Some(input, id)
 }
@@ -358,6 +366,7 @@ fn function_ty(input: Input) -> Parsed<Input, TypeId> {
 fn alias_ty(input: Input) -> Parsed<Input, TypeId> {
     let (mut i, ident) = ident.parse(input.clone())?;
     if let Some(ty) = i.ir.get_ty_alias(ident) {
+        let ty = i.ir.add_ty(Type::Aliased(ty));
         Parsed::Some(i, ty)
     } else {
         Parsed::None(input)
@@ -401,19 +410,21 @@ fn variable(input: Input, symbols: HashMap<StringId, Value>) -> Parsed<Input, Va
     }
 }
 
-fn access(input: Input, state: (BlockId, HashMap<StringId, Value>)) -> Parsed<Input, Value> {
-    let (block, symbols) = state;
-    let (mut input, (base, indices)) = apply(variable, symbols)
+fn access(
+    input: Input,
+    state: (RegionId, BlockId, HashMap<StringId, Value>),
+) -> Parsed<Input, Value> {
+    let (_, block, symbols) = state.clone();
+    let (mut input, (base, indices)) = apply(call, state)
+        .or(apply(variable, symbols))
         .and(many0(dot.and(int).map(|(_, index)| index)))
         .parse(input)?;
 
     let (value, _) = indices
         .iter()
         .fold((base, base.ty(&input.ir)), |(value, ty), index| {
-            let ty = ty.and_then(|ty| match &input.ir[ty] {
-                Type::Product(fields) => fields[input.ir[*index].parse::<usize>().unwrap()],
-                _ => panic!(),
-            });
+            let i = input.ir[*index].parse::<usize>().unwrap();
+            let ty = input.ir[input.ir.dealias_ty(ty)].product().unwrap()[i];
             let op = types::get(&mut input.ir, block, value, *index, ty);
             (Value::Op(op), ty)
         });
@@ -432,7 +443,7 @@ fn tuple_expr(
     .parse(input)?;
     let ty = Type::Product(fields.iter().map(|field| field.ty(&input.ir)).collect());
     let ty = input.ir.add_ty(ty);
-    let id = types::product(&mut input.ir, state.1, fields, Some(ty));
+    let id = types::product(&mut input.ir, state.1, fields, ty);
     Parsed::Some(input, Value::Op(id))
 }
 
@@ -447,26 +458,99 @@ fn call(
             right_round,
         ))
         .parse(input)?;
-    let func = input.symbols.get(&ident).unwrap();
-    let ret_ty = func.ty(&input.ir).and_then(|ty| match input.ir[ty] {
-        Type::Function(_, ret) => ret,
-        _ => None,
-    });
+    let arg_ty = arg.ty(&input.ir);
+    let (symbol, func) = input
+        .symbols
+        .iter()
+        .filter(|(s, _)| *s == ident)
+        .find(|(_, ty)| input.ir[ty.ty(&input.ir)].function().unwrap().0 == arg_ty)
+        .unwrap();
+    let ret_ty = input.ir[func.ty(&input.ir)].function().unwrap().1;
 
     let id = func::call(&mut input.ir, state.1, *func, arg, ret_ty);
     Parsed::Some(input, Value::Op(id))
+}
+
+fn variant(
+    input: Input,
+    state: (RegionId, BlockId, HashMap<StringId, Value>),
+) -> Parsed<Input, Value> {
+    let (mut input, (ident, value)) = ident
+        .and(delimited(
+            left_square,
+            apply(expr, state.clone()),
+            right_square,
+        ))
+        .parse(input)?;
+
+    let id = types::variant(&mut input.ir, state.1, value, ident);
+    Parsed::Some(input, Value::Op(id))
+}
+
+fn match_expr(
+    input: Input,
+    state: (RegionId, BlockId, HashMap<StringId, Value>),
+) -> Parsed<Input, Value> {
+    let (mut input, ((_, value), branches)) = keyword("match")
+        .and(apply(expr, state.clone()))
+        .and(delimited(
+            left_curly,
+            separated_list0(
+                apply(variant, state.clone())
+                    .and(arrow)
+                    .and(apply(expr, state.clone())),
+                comma,
+            ),
+            right_curly,
+        ))
+        .parse(input)?;
 }
 
 fn expr(
     input: Input,
     state: (RegionId, BlockId, HashMap<StringId, Value>),
 ) -> Parsed<Input, Value> {
-    let (region, block, symbols) = state.clone();
-    apply(access, (block, symbols.clone()))
+    let (region, b, symbols) = state.clone();
+    apply(block, state.clone())
+        .or(apply(access, state.clone()))
+        .or(apply(variant, state.clone()))
         .or(apply(call, state.clone()))
         .or(apply(tuple_expr, state))
         .or(apply(variable, symbols))
         .parse(input)
+}
+
+fn block(
+    input: Input,
+    state: (RegionId, BlockId, HashMap<StringId, Value>),
+) -> Parsed<Input, Value> {
+    left_curly
+        .and(apply(_block, state))
+        .and(right_curly)
+        .parse(input)
+        .map(|((_, x), _)| x)
+}
+
+fn _block(
+    mut input: Input,
+    mut state: (RegionId, BlockId, HashMap<StringId, Value>),
+) -> Parsed<Input, Value> {
+    loop {
+        let Parsed::Some(i, (((((ident, _), ty), _), value), _)) = ident
+            .and(colon)
+            .and(ty)
+            .and(equals)
+            .and(apply(expr, state.clone()))
+            .and(semicolon)
+            .parse(input.clone())
+        else {
+            break;
+        };
+        input = i;
+        let value = types::into(&mut input.ir, state.1, value, ty);
+        state.2.insert(ident, Value::Op(value));
+    }
+    apply(expr, state).parse(input)
 }
 
 fn fdecl(input: Input) -> Parsed<Input, ()> {
@@ -478,11 +562,10 @@ fn fdecl(input: Input) -> Parsed<Input, ()> {
         .and(arrow)
         .parse(input)
         .map(|(((((ident, _), ty), _), arg), _)| (ident, ty, arg))?;
+
     let region = input.ir.new_region();
     let entry = input.ir.add_string("entry");
-    let Type::Function(arg_ty, ret_ty) = input.ir[ty] else {
-        panic!()
-    };
+    let (arg_ty, ret_ty) = input.ir[ty].function().unwrap();
     let block = input.ir.append_block(region, entry, arg_ty);
     let (mut input, (value, _)) = apply(
         expr,
@@ -490,16 +573,22 @@ fn fdecl(input: Input) -> Parsed<Input, ()> {
     )
     .and(semicolon)
     .parse(input)?;
-    if let Some((value_ty, ret_ty)) = value
-        .ty(&input.ir)
-        .and_then(|value_ty| Some((value_ty, ret_ty?)))
+
     {
-        assert_eq!(value_ty, ret_ty);
+        let a = value.ty(&input.ir);
+        let b = input.ir.dealias_ty(ret_ty);
+        if a != b {
+            panic!(
+                "Type mismatch: found: {}, expected: {}",
+                input.ir.display_ty(a),
+                input.ir.display_ty(b)
+            )
+        }
     }
 
     func::ret(&mut input.ir, block, value, ret_ty);
-    let id = func::func(&mut input.ir, None, ident, region, Some(ty));
-    input.symbols.insert(ident, Value::Op(id));
+    let id = func::func(&mut input.ir, None, ident, region, ty);
+    input.symbols.push((ident, Value::Op(id)));
     Parsed::Some(input, ())
 }
 
@@ -507,7 +596,7 @@ pub fn parse_tokens(tokens: &[Token]) -> Option<IR> {
     let input = Input {
         tokens,
         ir: IR::new(),
-        symbols: HashMap::new(),
+        symbols: Vec::new(),
     };
     let (input, parsed) = many0(tdecl.or(fdecl)).parse(input).to_opt()?;
     println!("{:?}", parsed);

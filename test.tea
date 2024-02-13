@@ -1,33 +1,14 @@
 Vec2 :: (u32, u32);
-Option :: [u32 | ()];
-OptionVec2 :: [Vec2 | ()];
-Predicate :: Vec2 -> OptionVec2;
 
-test: Vec2 -> Vec2 = x -> (x.0, x.1);
-test2: (Vec2, Vec2) -> u32 = x -> x.0.0;
 add: (u32, u32) -> u32 = x -> x.0;
-add_vec2: (Vec2, Vec2) -> Vec2 = x -> (add((x.0.0, x.1.0)), add((x.0.1, x.1.1)));
+add: (Vec2, Vec2) -> Vec2 = x -> (add((x.0.0, x.1.0)), add((x.0.1, x.1.1)));
+test: (Vec2, Vec2) -> u32 = x -> add((add((x.0, x.1)).0, add((x.0, x.1)).1));
 
+Option :: [Some u32 | None ()];
 
-test :: u32 -> u32;
-test = x -> add({0 x, 1 1});
+some: u32 -> Option = x -> Some[x];
 
-test2 :: {} -> {};
-test2 = x -> x;
-
-add :: {0 u32, 1 u32} -> u32;
-add = x -> x.0;
-
-Vec2 :: {0 u32, 1 u32};
-
-add_vec2 :: {0 Vec2, 1 Vec2} -> Vec2;
-add_vec2 = x -> {0 add({0 x.0.0, 1 x.1.0}), 1 add({0 x.0.1, 1 x.1.1})};
-
-Option :: [Some u32, None {}];
-unwrap :: Option -> u32;
-unwrap = x -> match x {
+unwrap: Option -> u32 = x -> match x {
     Some[x] -> x,
     None[x] -> unreachable
-  };
-
-
+};

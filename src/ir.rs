@@ -72,7 +72,7 @@ impl Value {
         }
     }
 
-    pub fn ty(&self, ir: &IR) -> Option<TypeId> {
+    pub fn ty(&self, ir: &IR) -> TypeId {
         match self {
             Self::Arg(block) => ir[*block].arg,
             Self::Op(op) => ir[*op].ty,
@@ -85,14 +85,14 @@ pub struct Op {
     id: StringId,
     args: Vec<Value>,
     attrs: HashMap<StringId, Attr>,
-    ty: Option<TypeId>,
+    ty: TypeId,
     stored: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct Block {
     label: StringId,
-    arg: Option<TypeId>,
+    arg: TypeId,
     ops: Vec<OpId>,
 }
 
@@ -103,9 +103,10 @@ pub struct Region {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
-    Product(Vec<Option<TypeId>>),
-    Sum(Vec<Option<TypeId>>),
-    Function(Option<TypeId>, Option<TypeId>),
+    Product(Vec<TypeId>),
+    Sum(Vec<(StringId, TypeId)>),
+    Function(TypeId, TypeId),
+    Aliased(TypeId),
     U8,
     U16,
     U32,
@@ -121,20 +122,20 @@ pub enum Type {
 }
 
 impl Type {
-    pub fn product(&self) -> Option<&[Option<TypeId>]> {
+    pub fn product(&self) -> Option<&[TypeId]> {
         match self {
             Self::Product(fields) => Some(fields),
             _ => None,
         }
     }
-    pub fn sum(&self) -> Option<&[Option<TypeId>]> {
+    pub fn sum(&self) -> Option<&[(StringId, TypeId)]> {
         match self {
             Self::Sum(variants) => Some(variants),
             _ => None,
         }
     }
 
-    pub fn function(&self) -> Option<(Option<TypeId>, Option<TypeId>)> {
+    pub fn function(&self) -> Option<(TypeId, TypeId)> {
         match self {
             Self::Function(arg, ret) => Some((*arg, *ret)),
             _ => None,
@@ -227,12 +228,7 @@ impl IR {
         self.add_region(region)
     }
 
-    pub fn append_block(
-        &mut self,
-        region: RegionId,
-        label: StringId,
-        arg: Option<TypeId>,
-    ) -> BlockId {
+    pub fn append_block(&mut self, region: RegionId, label: StringId, arg: TypeId) -> BlockId {
         let block = Block {
             label,
             arg,
@@ -252,6 +248,13 @@ impl IR {
             Decl::TypeAlias(id, ty) if *id == alias => Some(*ty),
             _ => None,
         })
+    }
+
+    pub fn dealias_ty(&self, ty: TypeId) -> TypeId {
+        match self[ty] {
+            Type::Aliased(ty) => ty,
+            _ => ty,
+        }
     }
 
     fn display_block(&self, block: BlockId) -> String {
@@ -289,7 +292,7 @@ impl IR {
 
     fn display_attr(&self, attr: Attr) -> String {
         match attr {
-            Attr::Type(ty) => self.display_ty(Some(ty)),
+            Attr::Type(ty) => self.display_ty(ty),
             Attr::Symbol(str) => self[str].clone(),
             Attr::Region(region) => self.display_region(region),
             Attr::Int(str) => self[str].clone(),
@@ -322,12 +325,8 @@ impl IR {
         format!("{}{}({}) {{{}}}{}", result, self[op.id], args, attrs, ty)
     }
 
-    fn display_ty(&self, ty: Option<TypeId>) -> String {
-        if ty.is_none() {
-            return "<infer>".to_string();
-        }
-
-        match &self[ty.unwrap()] {
+    pub fn display_ty(&self, ty: TypeId) -> String {
+        match &self[ty] {
             Type::Product(fields) => format!(
                 "({})",
                 fields
@@ -338,12 +337,20 @@ impl IR {
             ),
             Type::Sum(variants) => variants
                 .iter()
-                .map(|x| self.display_ty(*x))
+                .map(|(ident, ty)| format!("{} {}", self[*ident], self.display_ty(*ty)))
                 .collect::<Vec<String>>()
                 .join(" | "),
             Type::Function(arg, ret) => {
                 format!("{} -> {}", self.display_ty(*arg), self.display_ty(*ret))
             }
+            Type::Aliased(ty) => self
+                .decls
+                .iter()
+                .find_map(|decl| match decl {
+                    Decl::TypeAlias(s, t) if t == ty => Some(self[*s].clone()),
+                    _ => None,
+                })
+                .unwrap(),
             Type::U8 => "u8".to_string(),
             Type::U16 => "u16".to_string(),
             Type::U32 => "u32".to_string(),
@@ -365,11 +372,11 @@ impl IR {
             .map(|decl| match decl {
                 Decl::Op(id) => self.display_op(*id),
                 Decl::TypeAlias(alias, ty) => {
-                    format!("!{} = {}", self[*alias], self.display_ty(Some(*ty)))
+                    format!("!{} = {}", self[*alias], self.display_ty(*ty))
                 }
             })
             .collect::<Vec<String>>()
-            .join("\n")
+            .join("\n\n")
     }
 }
 
@@ -400,7 +407,7 @@ impl_ir_index!(RegionId, Region, regions);
 pub mod arith {
     use super::*;
 
-    pub fn addi(ir: &mut IR, block: BlockId, lhs: Value, rhs: Value, ty: Option<TypeId>) -> OpId {
+    pub fn addi(ir: &mut IR, block: BlockId, lhs: Value, rhs: Value, ty: TypeId) -> OpId {
         let id = ir.add_string("arith.addi");
         let op = Op {
             id,
@@ -412,7 +419,7 @@ pub mod arith {
         ir.append_op(block, op)
     }
 
-    pub fn int(ir: &mut IR, block: BlockId, int: StringId, ty: Option<TypeId>) -> OpId {
+    pub fn int(ir: &mut IR, block: BlockId, int: StringId, ty: TypeId) -> OpId {
         let id = ir.add_string("arith.int");
         let value = ir.add_string("value");
         let op = Op {
@@ -429,13 +436,7 @@ pub mod arith {
 pub mod types {
     use super::*;
 
-    pub fn get(
-        ir: &mut IR,
-        block: BlockId,
-        base: Value,
-        index: StringId,
-        ty: Option<TypeId>,
-    ) -> OpId {
+    pub fn get(ir: &mut IR, block: BlockId, base: Value, index: StringId, ty: TypeId) -> OpId {
         let id = ir.add_string("types.get");
         let kindex = ir.add_string("index");
         let op = Op {
@@ -448,13 +449,48 @@ pub mod types {
         ir.append_op(block, op)
     }
 
-    pub fn product(ir: &mut IR, block: BlockId, args: Vec<Value>, ty: Option<TypeId>) -> OpId {
+    pub fn product(ir: &mut IR, block: BlockId, args: Vec<Value>, ty: TypeId) -> OpId {
         let id = ir.add_string("types.product");
         let op = Op {
             id,
             args,
             attrs: HashMap::new(),
             ty,
+            stored: true,
+        };
+        ir.append_op(block, op)
+    }
+
+    pub fn into(ir: &mut IR, block: BlockId, value: Value, ty: TypeId) -> OpId {
+        let id = ir.add_string("types.into");
+        let op = Op {
+            id,
+            args: vec![value],
+            attrs: HashMap::new(),
+            ty,
+            stored: true,
+        };
+        ir.append_op(block, op)
+    }
+
+    pub fn variant(ir: &mut IR, block: BlockId, value: Value, variant: StringId) -> OpId {
+        let id = ir.add_string("types.variant");
+        let variant_key = ir.add_string("variant");
+        let (i, _) = ir
+            .types
+            .iter()
+            .enumerate()
+            .find(|(_, ty)| {
+                ty.sum()
+                    .map(|x| x.iter().find(|(ident, _)| *ident == variant).is_some())
+                    .unwrap_or_default()
+            })
+            .expect("Can't find variant");
+        let op = Op {
+            id,
+            args: vec![value],
+            attrs: HashMap::from([(variant_key, Attr::Symbol(variant))]),
+            ty: TypeId(i),
             stored: true,
         };
         ir.append_op(block, op)
@@ -469,7 +505,7 @@ pub mod func {
         block: Option<BlockId>,
         symbol: StringId,
         body: RegionId,
-        ty: Option<TypeId>,
+        ty: TypeId,
     ) -> OpId {
         let id = ir.add_string("func.func");
         let ksymbol = ir.add_string("symbol");
@@ -490,7 +526,7 @@ pub mod func {
         }
     }
 
-    pub fn ret(ir: &mut IR, block: BlockId, value: Value, ty: Option<TypeId>) -> OpId {
+    pub fn ret(ir: &mut IR, block: BlockId, value: Value, ty: TypeId) -> OpId {
         let id = ir.add_string("func.ret");
         let op = Op {
             id,
@@ -502,11 +538,11 @@ pub mod func {
         ir.append_op(block, op)
     }
 
-    pub fn call(ir: &mut IR, block: BlockId, func: Value, arg: Value, ty: Option<TypeId>) -> OpId {
+    pub fn call(ir: &mut IR, block: BlockId, func: Value, arg: Value, ty: TypeId) -> OpId {
         let id = ir.add_string("func.call");
         let op = Op {
             id,
-            args: vec![arg],
+            args: vec![func, arg],
             attrs: HashMap::new(),
             ty,
             stored: true,
