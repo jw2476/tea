@@ -1,25 +1,18 @@
 #![feature(try_trait_v2)]
+#![feature(box_patterns)]
 
-use ir::{
-    arith::{addi, int},
-    func::func,
-    IR,
-};
 use lex::tokenize;
-use parse::parse_tokens;
-
-use crate::ir::{func::ret, Type};
 
 mod ir;
 mod lex;
-//mod opt;
 mod parse;
 
 fn main() {
     let file = String::from_utf8(std::fs::read("test.tea").unwrap()).unwrap();
     let tokens = tokenize(&file);
-    let mut ir = parse_tokens(&tokens).unwrap();
-    println!("{}", ir.display());
+    let mut ast = parse::parse(&tokens).unwrap();
+    println!("{:#?}", ast);
+    //println!("{}", ir.display());
 
     /*
     let mut ir = IR::new();
@@ -33,7 +26,7 @@ fn main() {
     let lhs = int(&mut ir, block, one, Some(int_ty));
     let rhs = int(&mut ir, block, two, Some(int_ty));
     let int_pair_ty = ir.add_ty(Type::Product(vec![int_ty; 2]));
-    let addi_ty = ir.add_ty(Type::Function(int_pair_ty, int_ty));
+    let addi_ty = ir.add_ty(Typre::Function(int_pair_ty, int_ty));
     let res = addi(&mut ir, block, lhs.into(), rhs.into(), Some(addi_ty));
     ret(&mut ir, block, res.into(), Some(int_ty));
     let main = ir.add_string("main");

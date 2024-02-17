@@ -1,24 +1,46 @@
 use std::{
-    collections::HashMap,
     convert::Infallible,
     marker::PhantomData,
-    ops::{FromResidual, RangeFrom, Try},
+    ops::{FromResidual, Try},
 };
 
 use crate::{
-    ir::{
-        func,
-        types::{self, variant},
-        BlockId, Decl, OpId, RegionId, StringId, Type, TypeId, Value, IR,
-    },
+    ir::{TypeId, IR},
     lex::Token,
 };
 
-#[derive(Clone, Debug)]
-pub struct Input<'a> {
+#[derive(Clone, Copy, Debug)]
+pub struct Ctx<'a> {
     tokens: &'a [Token],
-    ir: IR,
-    symbols: Vec<(StringId, Value)>,
+}
+
+impl Ctx<'_> {
+    pub fn pop(self) -> Self {
+        Ctx {
+            tokens: &self.tokens[1..],
+        }
+    }
+
+    pub fn eat(self, token: &Token) -> Parsed<Self, ()> {
+        match self.tokens.first() {
+            Some(t) if t == token => Parsed::Some(self.pop(), ()),
+            _ => Parsed::None(self),
+        }
+    }
+
+    pub fn ident(self) -> Parsed<Self, String> {
+        match self.tokens.first() {
+            Some(Token::Identifier(ident)) => Parsed::Some(self.pop(), ident.clone()),
+            _ => Parsed::None(self),
+        }
+    }
+
+    pub fn int(self) -> Parsed<Self, String> {
+        match self.tokens.first() {
+            Some(Token::Integer(ident)) => Parsed::Some(self.pop(), ident.clone()),
+            _ => Parsed::None(self),
+        }
+    }
 }
 
 pub enum Parsed<I, A> {
@@ -26,73 +48,17 @@ pub enum Parsed<I, A> {
     None(I),
 }
 
-impl<I, A> FromResidual for Parsed<I, A> {
-    fn from_residual(residual: <Self as Try>::Residual) -> Self {
-        match residual {
-            Parsed::None(input) => Self::None(input),
-            _ => panic!(),
-        }
-    }
-}
-
-impl<I, A> Try for Parsed<I, A> {
-    type Output = (I, A);
-    type Residual = Parsed<I, Infallible>;
-
-    fn from_output(output: Self::Output) -> Self {
-        Self::Some(output.0, output.1)
-    }
-
-    fn branch(self) -> std::ops::ControlFlow<Self::Residual, Self::Output> {
-        match self {
-            Self::Some(input, x) => std::ops::ControlFlow::Continue((input, x)),
-            Self::None(input) => std::ops::ControlFlow::Break(Parsed::None(input)),
-        }
-    }
-}
-
 impl<I, A> Parsed<I, A> {
-    fn to_opt(self) -> Option<(I, A)> {
+    pub fn opt(self) -> (I, Option<A>) {
         match self {
-            Self::Some(input, value) => Some((input, value)),
-            Self::None(_) => None,
-        }
-    }
-
-    pub fn map<B, F: Fn(A) -> B>(self, f: F) -> Parsed<I, B> {
-        match self {
-            Self::Some(input, a) => Parsed::Some(input, f(a)),
-            Self::None(input) => Parsed::None(input),
-        }
-    }
-}
-
-impl Input<'_> {
-    fn slice(self, range: RangeFrom<usize>) -> Self {
-        Self {
-            tokens: &self.tokens[range],
-            ir: self.ir,
-            symbols: self.symbols,
+            Self::Some(input, a) => (input, Some(a)),
+            Self::None(input) => (input, None),
         }
     }
 }
 
 pub trait Parser<I, A> {
-    fn parse(&self, input: I) -> Parsed<I, A>;
-
-    fn and<B, G: Parser<I, B>>(self, g: G) -> And<Self, G>
-    where
-        Self: Sized,
-    {
-        And { f: self, g }
-    }
-
-    fn or<G: Parser<I, A>>(self, g: G) -> Or<Self, G>
-    where
-        Self: Sized,
-    {
-        Or { f: self, g }
-    }
+    fn parse(&mut self, input: I) -> Parsed<I, A>;
 
     fn map<B, G: Fn(A) -> B>(self, g: G) -> Map<Self, G, A>
     where
@@ -104,6 +70,46 @@ pub trait Parser<I, A> {
             phantom: PhantomData,
         }
     }
+
+    fn and<B, G: Parser<I, B>>(self, g: G) -> And<Self, G>
+    where
+        Self: Sized,
+    {
+        And { f: self, g }
+    }
+
+    fn silent_and<B, G: Parser<I, B>>(self, g: G) -> SilentAnd<Self, G, B>
+    where
+        Self: Sized,
+    {
+        SilentAnd {
+            f: self,
+            g,
+            phantom: PhantomData,
+        }
+    }
+
+    fn or<G: Parser<I, A>>(self, g: G) -> Or<Self, G>
+    where
+        Self: Sized,
+    {
+        Or { f: self, g }
+    }
+}
+
+pub struct Map<F, G, A> {
+    f: F,
+    g: G,
+    phantom: PhantomData<A>,
+}
+
+impl<I, A, B, F: Parser<I, A>, G: Fn(A) -> B> Parser<I, B> for Map<F, G, A> {
+    fn parse(&mut self, input: I) -> Parsed<I, B> {
+        match self.f.parse(input) {
+            Parsed::Some(input, a) => Parsed::Some(input, (self.g)(a)),
+            Parsed::None(input) => Parsed::None(input),
+        }
+    }
 }
 
 pub struct And<F, G> {
@@ -113,13 +119,41 @@ pub struct And<F, G> {
 
 impl<I, A, B, F, G> Parser<I, (A, B)> for And<F, G>
 where
+    I: Clone,
     F: Parser<I, A>,
     G: Parser<I, B>,
 {
-    fn parse(&self, input: I) -> Parsed<I, (A, B)> {
-        let (input, a) = self.f.parse(input)?;
-        let (input, b) = self.g.parse(input)?;
-        Parsed::Some(input, (a, b))
+    fn parse(&mut self, input: I) -> Parsed<I, (A, B)> {
+        match self.f.parse(input.clone()) {
+            Parsed::Some(i, a) => match self.g.parse(i) {
+                Parsed::Some(i, b) => Parsed::Some(i, (a, b)),
+                Parsed::None(i) => Parsed::None(input),
+            },
+            Parsed::None(i) => Parsed::None(input),
+        }
+    }
+}
+
+pub struct SilentAnd<F, G, B> {
+    f: F,
+    g: G,
+    phantom: PhantomData<B>,
+}
+
+impl<I, A, B, F, G> Parser<I, A> for SilentAnd<F, G, B>
+where
+    I: Clone,
+    F: Parser<I, A>,
+    G: Parser<I, B>,
+{
+    fn parse(&mut self, input: I) -> Parsed<I, A> {
+        match self.f.parse(input.clone()) {
+            Parsed::Some(i, a) => match self.g.parse(i) {
+                Parsed::Some(i, b) => Parsed::Some(i, a),
+                Parsed::None(i) => Parsed::None(input),
+            },
+            Parsed::None(i) => Parsed::None(input),
+        }
     }
 }
 
@@ -134,7 +168,7 @@ where
     G: Parser<I, A>,
     I: Clone,
 {
-    fn parse(&self, input: I) -> Parsed<I, A> {
+    fn parse(&mut self, input: I) -> Parsed<I, A> {
         match self.f.parse(input.clone()) {
             Parsed::None(_) => self.g.parse(input),
             x => x,
@@ -142,122 +176,30 @@ where
     }
 }
 
-pub struct Map<F, G, A> {
-    f: F,
-    g: G,
-    phantom: PhantomData<A>,
-}
-
-impl<I, A, B, F, G> Parser<I, B> for Map<F, G, A>
-where
-    F: Parser<I, A>,
-    G: Fn(A) -> B,
-{
-    fn parse(&self, input: I) -> Parsed<I, B> {
-        match self.f.parse(input) {
-            Parsed::Some(input, a) => Parsed::Some(input, (self.g)(a)),
-            Parsed::None(input) => Parsed::None(input),
-        }
-    }
-}
-
-impl<I, A, T> Parser<I, A> for T
-where
-    T: Fn(I) -> Parsed<I, A>,
-{
-    fn parse(&self, input: I) -> Parsed<I, A> {
-        self(input)
-    }
-}
-
-pub fn apply<IA, IB, A, F>(f: F, value: IB) -> Apply<F, IB>
-where
-    F: Fn(IA, IB) -> Parsed<IA, A>,
-{
-    Apply { f, value }
-}
-
-pub struct Apply<F, IB> {
-    f: F,
-    value: IB,
-}
-
-impl<IA, IB, A, F> Parser<IA, A> for Apply<F, IB>
-where
-    F: Fn(IA, IB) -> Parsed<IA, A>,
-    IB: Clone,
-{
-    fn parse(&self, input: IA) -> Parsed<IA, A> {
-        (self.f)(input, self.value.clone())
-    }
-}
-
-fn ident(mut input: Input) -> Parsed<Input, StringId> {
-    match input.tokens.first().cloned() {
-        Some(Token::Identifier(ident)) => {
-            let id = input.ir.add_string(ident);
-            Parsed::Some(input.slice(1..), id)
-        }
-        _ => Parsed::None(input),
-    }
-}
-
-fn int(mut input: Input) -> Parsed<Input, StringId> {
-    match input.tokens.first().cloned() {
-        Some(Token::Integer(ident)) => {
-            let id = input.ir.add_string(ident);
-            Parsed::Some(input.slice(1..), id)
-        }
-        _ => Parsed::None(input),
-    }
-}
-
-macro_rules! tok_parser {
-    ($n:ident, $p: pat) => {
-        fn $n(input: Input) -> Parsed<Input, ()> {
-            match input.tokens.first().cloned() {
-                Some($p) => Parsed::Some(input.slice(1..), ()),
-                _ => Parsed::None(input),
-            }
-        }
-    };
-}
-
-tok_parser!(double_colon, Token::DoubleColon);
-tok_parser!(comma, Token::Comma);
-tok_parser!(left_square, Token::LeftSquare);
-tok_parser!(right_square, Token::RightSquare);
-tok_parser!(left_curly, Token::LeftCurly);
-tok_parser!(right_curly, Token::RightCurly);
-tok_parser!(left_round, Token::LeftRound);
-tok_parser!(right_round, Token::RightRound);
-tok_parser!(arrow, Token::Arrow);
-tok_parser!(semicolon, Token::Semicolon);
-tok_parser!(equals, Token::Equals);
-tok_parser!(pipe, Token::Pipe);
-tok_parser!(wide_arrow, Token::WideArrow);
-tok_parser!(dot, Token::Dot);
-tok_parser!(colon, Token::Colon);
-tok_parser!(underscore, Token::Underscore);
-tok_parser!(tick, Token::Tick);
-tok_parser!(left_angle, Token::LeftAngle);
-tok_parser!(right_angle, Token::RightAngle);
-
-fn delimited<I, A, B, C, F, G, H>(left: F, value: G, right: H) -> impl Fn(I) -> Parsed<I, B>
+fn delimited<I, A, B, C, F, G, H>(
+    mut left: F,
+    mut value: G,
+    mut right: H,
+) -> impl FnMut(I) -> Parsed<I, B>
 where
     F: Parser<I, A>,
     G: Parser<I, B>,
     H: Parser<I, C>,
-    B: Clone,
+    I: Clone,
 {
-    move |input: I| {
-        let (input, _) = left.parse(input)?;
-        let (input, x) = value.parse(input)?;
-        right.parse(input).map(|_| x.clone())
+    move |input: I| match left.parse(input.clone()) {
+        Parsed::Some(i, _) => match value.parse(i) {
+            Parsed::Some(i, value) => match right.parse(i) {
+                Parsed::Some(i, _) => Parsed::Some(i, value),
+                Parsed::None(_) => Parsed::None(input),
+            },
+            Parsed::None(_) => Parsed::None(input),
+        },
+        Parsed::None(_) => Parsed::None(input),
     }
 }
 
-fn many0<I, A, F>(f: F) -> impl Fn(I) -> Parsed<I, Vec<A>>
+fn many0<I, A, F>(mut f: F) -> impl FnMut(I) -> Parsed<I, Vec<A>>
 where
     F: Parser<I, A>,
 {
@@ -276,7 +218,31 @@ where
     }
 }
 
-fn separated_list0<I, A, B, F, G>(value: F, separator: G) -> impl Fn(I) -> Parsed<I, Vec<A>>
+fn many1<I, A, F>(mut f: F) -> impl FnMut(I) -> Parsed<I, Vec<A>>
+where
+    F: Parser<I, A>,
+{
+    move |input: I| match f.parse(input) {
+        Parsed::Some(mut input, value) => {
+            let mut parsed = vec![value];
+            loop {
+                input = match f.parse(input) {
+                    Parsed::Some(input, value) => {
+                        parsed.push(value);
+                        input
+                    }
+                    Parsed::None(input) => return Parsed::Some(input, parsed),
+                }
+            }
+        }
+        Parsed::None(input) => Parsed::None(input),
+    }
+}
+
+fn separated_list0<I, A, B, F, G>(
+    mut value: F,
+    mut separator: G,
+) -> impl FnMut(I) -> Parsed<I, Vec<A>>
 where
     F: Parser<I, A>,
     G: Parser<I, B>,
@@ -304,19 +270,145 @@ where
     }
 }
 
-fn keyword<T: ToString>(word: T) -> impl Fn(Input) -> Parsed<Input, ()> {
-    move |mut input: Input| {
-        let id = input.ir.add_string(word.to_string());
-        match ident.parse(input.clone()) {
-            Parsed::Some(i, ident) if ident == id => Parsed::Some(i, ()),
-            Parsed::Some(_, _) => Parsed::None(input),
-            Parsed::None(_) => Parsed::None(input),
+fn separated_list1<I, A, B, F, G>(
+    mut value: F,
+    mut separator: G,
+) -> impl FnMut(I) -> Parsed<I, Vec<A>>
+where
+    F: Parser<I, A>,
+    G: Parser<I, B>,
+{
+    move |input: I| {
+        let (mut input, item) = match value.parse(input) {
+            Parsed::Some(input, item) => (input, item),
+            Parsed::None(input) => return Parsed::None(input),
+        };
+
+        let mut items = vec![item];
+
+        loop {
+            input = match separator.parse(input) {
+                Parsed::None(input) => return Parsed::Some(input, items),
+                Parsed::Some(input, _) => match value.parse(input) {
+                    Parsed::None(input) => return Parsed::Some(input, items),
+                    Parsed::Some(input, item) => {
+                        items.push(item);
+                        input
+                    }
+                },
+            }
         }
     }
 }
 
-fn keyword_ty(input: Input) -> Parsed<Input, TypeId> {
-    let (mut input, ty) = (keyword("u8").map(|_| Type::U8))
+fn opt<I, A, F: Parser<I, A>>(mut f: F) -> impl FnMut(I) -> Parsed<I, Option<A>> {
+    move |input: I| match f.parse(input) {
+        Parsed::Some(input, a) => Parsed::Some(input, Some(a)),
+        Parsed::None(input) => Parsed::Some(input, None),
+    }
+}
+
+impl<'a> Parser<Ctx<'a>, ()> for Token {
+    fn parse(&mut self, input: Ctx<'a>) -> Parsed<Ctx<'a>, ()> {
+        input.eat(self)
+    }
+}
+
+impl<I, A, T: FnMut(I) -> Parsed<I, A>> Parser<I, A> for T {
+    fn parse(&mut self, input: I) -> Parsed<I, A> {
+        self(input)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SumType {
+    variants: Vec<(String, Type)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProductType {
+    fields: Vec<(String, Type)>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Type {
+    Sum(SumType),
+    Product(ProductType),
+    Function(Box<Type>, Box<Type>),
+    Alias(String),
+    U8,
+    U16,
+    U32,
+    U64,
+    USize,
+    I8,
+    I16,
+    I32,
+    I64,
+    ISize,
+    F32,
+    F64,
+}
+
+fn keyword<'a>(text: &'a str) -> impl Parser<Ctx<'a>, ()> {
+    move |input: Ctx<'a>| input.eat(&Token::Identifier(text.to_owned()))
+}
+
+fn ident(input: Ctx) -> Parsed<Ctx, String> {
+    input.ident()
+}
+
+fn int(input: Ctx) -> Parsed<Ctx, String> {
+    input.int()
+}
+
+fn tuple_ty(input: Ctx) -> Parsed<Ctx, ProductType> {
+    delimited(
+        Token::LeftRound,
+        separated_list0(ty, Token::Comma),
+        Token::RightRound,
+    )
+    .map(|fields| ProductType {
+        fields: fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, field)| (i.to_string(), field))
+            .collect(),
+    })
+    .parse(input)
+}
+
+fn product_ty(input: Ctx) -> Parsed<Ctx, ProductType> {
+    delimited(
+        Token::LeftCurly,
+        separated_list0(ident.and(ty), Token::Comma),
+        Token::RightCurly,
+    )
+    .map(|fields| ProductType { fields })
+    .parse(input)
+}
+
+fn sum_ty(input: Ctx) -> Parsed<Ctx, SumType> {
+    delimited(
+        Token::LeftSquare,
+        separated_list0(ident.and(ty), Token::Comma),
+        Token::RightSquare,
+    )
+    .map(|variants| SumType { variants })
+    .parse(input)
+}
+
+fn function_ty(input: Ctx) -> Parsed<Ctx, Type> {
+    arg_ty
+        .silent_and(Token::Arrow)
+        .and(ty)
+        .map(|(arg, ret)| Type::Function(Box::new(arg), Box::new(ret)))
+        .parse(input)
+}
+
+fn primitive_ty(input: Ctx) -> Parsed<Ctx, Type> {
+    keyword("u8")
+        .map(|_| Type::U8)
         .or(keyword("u16").map(|_| Type::U16))
         .or(keyword("u32").map(|_| Type::U32))
         .or(keyword("u64").map(|_| Type::U64))
@@ -328,278 +420,193 @@ fn keyword_ty(input: Input) -> Parsed<Input, TypeId> {
         .or(keyword("isize").map(|_| Type::ISize))
         .or(keyword("f32").map(|_| Type::F32))
         .or(keyword("f64").map(|_| Type::F64))
-        .parse(input)?;
-    let ty = input.ir.add_ty(ty);
-    Parsed::Some(input, ty)
-}
-
-fn tuple_ty(input: Input) -> Parsed<Input, TypeId> {
-    let (mut input, ty) = delimited(left_round, separated_list0(ty, comma), right_round)
-        .parse(input)
-        .map(Type::Product)?;
-    let id = input.ir.add_ty(ty);
-    Parsed::Some(input, id)
-}
-
-fn sum_ty(input: Input) -> Parsed<Input, TypeId> {
-    let (mut input, ty) = delimited(
-        left_square,
-        separated_list0(ident.and(ty), pipe),
-        right_square,
-    )
-    .parse(input)
-    .map(Type::Sum)?;
-    let id = input.ir.add_ty(ty);
-    Parsed::Some(input, id)
-}
-
-fn function_ty(input: Input) -> Parsed<Input, TypeId> {
-    let (mut input, ty) = arg
-        .and(arrow)
-        .and(ty)
-        .parse(input)
-        .map(|((arg, _), ret)| Type::Function(arg, ret))?;
-    let id = input.ir.add_ty(ty);
-    Parsed::Some(input, id)
-}
-
-fn alias_ty(input: Input) -> Parsed<Input, TypeId> {
-    let (mut i, ident) = ident.parse(input.clone())?;
-    if let Some(ty) = i.ir.get_ty_alias(ident) {
-        let ty = i.ir.add_ty(Type::Aliased(ty));
-        Parsed::Some(i, ty)
-    } else {
-        Parsed::None(input)
-    }
-}
-
-fn arg(input: Input) -> Parsed<Input, TypeId> {
-    delimited(left_round, function_ty, left_round)
-        .or(tuple_ty)
-        .or(sum_ty)
-        .or(keyword_ty)
-        .or(alias_ty)
         .parse(input)
 }
 
-fn ty(input: Input) -> Parsed<Input, TypeId> {
-    function_ty
-        .or(tuple_ty)
-        .or(sum_ty)
-        .or(keyword_ty)
-        .or(alias_ty)
-        .parse(input)
-}
-
-fn tdecl(input: Input) -> Parsed<Input, ()> {
-    let (mut input, (ident, ty)) = ident
-        .and(double_colon)
-        .and(ty)
-        .and(semicolon)
-        .parse(input)
-        .map(|(((ident, _), ty), _)| (ident, ty))?;
-    input.ir.add_ty_alias(ident, ty);
-    Parsed::Some(input, ())
-}
-
-fn variable(input: Input, symbols: HashMap<StringId, Value>) -> Parsed<Input, Value> {
-    let (i, ident) = ident.parse(input.clone())?;
-    match symbols.get(&ident) {
-        Some(value) => Parsed::Some(i, *value),
-        None => Parsed::None(input),
-    }
-}
-
-fn access(
-    input: Input,
-    state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    let (_, block, symbols) = state.clone();
-    let (mut input, (base, indices)) = apply(call, state)
-        .or(apply(variable, symbols))
-        .and(many0(dot.and(int).map(|(_, index)| index)))
-        .parse(input)?;
-
-    let (value, _) = indices
-        .iter()
-        .fold((base, base.ty(&input.ir)), |(value, ty), index| {
-            let i = input.ir[*index].parse::<usize>().unwrap();
-            let ty = input.ir[input.ir.dealias_ty(ty)].product().unwrap()[i];
-            let op = types::get(&mut input.ir, block, value, *index, ty);
-            (Value::Op(op), ty)
-        });
-    Parsed::Some(input, value)
-}
-
-fn tuple_expr(
-    input: Input,
-    state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    let (mut input, fields) = delimited(
-        left_round,
-        separated_list0(apply(expr, state.clone()), comma),
-        right_round,
-    )
-    .parse(input)?;
-    let ty = Type::Product(fields.iter().map(|field| field.ty(&input.ir)).collect());
-    let ty = input.ir.add_ty(ty);
-    let id = types::product(&mut input.ir, state.1, fields, ty);
-    Parsed::Some(input, Value::Op(id))
-}
-
-fn call(
-    input: Input,
-    state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    let (mut input, (ident, arg)) = ident
-        .and(delimited(
-            left_round,
-            apply(expr, state.clone()),
-            right_round,
-        ))
-        .parse(input)?;
-    let arg_ty = arg.ty(&input.ir);
-    let (symbol, func) = input
-        .symbols
-        .iter()
-        .filter(|(s, _)| *s == ident)
-        .find(|(_, ty)| input.ir[ty.ty(&input.ir)].function().unwrap().0 == arg_ty)
-        .unwrap();
-    let ret_ty = input.ir[func.ty(&input.ir)].function().unwrap().1;
-
-    let id = func::call(&mut input.ir, state.1, *func, arg, ret_ty);
-    Parsed::Some(input, Value::Op(id))
-}
-
-fn variant(
-    input: Input,
-    state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    let (mut input, (ident, value)) = ident
-        .and(delimited(
-            left_square,
-            apply(expr, state.clone()),
-            right_square,
-        ))
-        .parse(input)?;
-
-    let id = types::variant(&mut input.ir, state.1, value, ident);
-    Parsed::Some(input, Value::Op(id))
-}
-
-fn match_expr(
-    input: Input,
-    state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    let (mut input, ((_, value), branches)) = keyword("match")
-        .and(apply(expr, state.clone()))
-        .and(delimited(
-            left_curly,
-            separated_list0(
-                apply(variant, state.clone())
-                    .and(arrow)
-                    .and(apply(expr, state.clone())),
-                comma,
-            ),
-            right_curly,
-        ))
-        .parse(input)?;
-}
-
-fn expr(
-    input: Input,
-    state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    let (region, b, symbols) = state.clone();
-    apply(block, state.clone())
-        .or(apply(access, state.clone()))
-        .or(apply(variant, state.clone()))
-        .or(apply(call, state.clone()))
-        .or(apply(tuple_expr, state))
-        .or(apply(variable, symbols))
-        .parse(input)
-}
-
-fn block(
-    input: Input,
-    state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    left_curly
-        .and(apply(_block, state))
-        .and(right_curly)
-        .parse(input)
-        .map(|((_, x), _)| x)
-}
-
-fn _block(
-    mut input: Input,
-    mut state: (RegionId, BlockId, HashMap<StringId, Value>),
-) -> Parsed<Input, Value> {
-    loop {
-        let Parsed::Some(i, (((((ident, _), ty), _), value), _)) = ident
-            .and(colon)
-            .and(ty)
-            .and(equals)
-            .and(apply(expr, state.clone()))
-            .and(semicolon)
-            .parse(input.clone())
-        else {
-            break;
-        };
-        input = i;
-        let value = types::into(&mut input.ir, state.1, value, ty);
-        state.2.insert(ident, Value::Op(value));
-    }
-    apply(expr, state).parse(input)
-}
-
-fn fdecl(input: Input) -> Parsed<Input, ()> {
-    let (mut input, (ident, ty, arg)) = ident
-        .and(colon)
-        .and(ty)
-        .and(equals)
-        .and(ident)
-        .and(arrow)
-        .parse(input)
-        .map(|(((((ident, _), ty), _), arg), _)| (ident, ty, arg))?;
-
-    let region = input.ir.new_region();
-    let entry = input.ir.add_string("entry");
-    let (arg_ty, ret_ty) = input.ir[ty].function().unwrap();
-    let block = input.ir.append_block(region, entry, arg_ty);
-    let (mut input, (value, _)) = apply(
-        expr,
-        (region, block, HashMap::from([(arg, Value::Arg(block))])),
-    )
-    .and(semicolon)
-    .parse(input)?;
-
-    {
-        let a = value.ty(&input.ir);
-        let b = input.ir.dealias_ty(ret_ty);
-        if a != b {
-            panic!(
-                "Type mismatch: found: {}, expected: {}",
-                input.ir.display_ty(a),
-                input.ir.display_ty(b)
-            )
+fn ty_common(input: Ctx, arg: bool) -> Parsed<Ctx, Type> {
+    fn function(input: Ctx, arg: bool) -> Parsed<Ctx, Type> {
+        if arg {
+            delimited(Token::LeftRound, function_ty, Token::RightRound).parse(input)
+        } else {
+            function_ty.parse(input)
         }
     }
 
-    func::ret(&mut input.ir, block, value, ret_ty);
-    let id = func::func(&mut input.ir, None, ident, region, ty);
-    input.symbols.push((ident, Value::Op(id)));
-    Parsed::Some(input, ())
+    (|input| function(input, arg))
+        .or(tuple_ty.or(product_ty).map(Type::Product))
+        .or(sum_ty.map(Type::Sum))
+        .or(primitive_ty)
+        .or(ident.map(Type::Alias))
+        .parse(input)
 }
 
-pub fn parse_tokens(tokens: &[Token]) -> Option<IR> {
-    let input = Input {
-        tokens,
-        ir: IR::new(),
-        symbols: Vec::new(),
-    };
-    let (input, parsed) = many0(tdecl.or(fdecl)).parse(input).to_opt()?;
-    println!("{:?}", parsed);
-    //let (input, parsed) = many0(tdecl.or(vdecl)).parse(input).unwrap();
-    Some(input.ir)
+fn ty(input: Ctx) -> Parsed<Ctx, Type> {
+    ty_common(input, false)
+}
+
+fn arg_ty(input: Ctx) -> Parsed<Ctx, Type> {
+    ty_common(input, true)
+}
+
+fn tdecl(input: Ctx) -> Parsed<Ctx, Stat> {
+    ident
+        .silent_and(Token::DoubleColon)
+        .and(ty)
+        .silent_and(Token::Semicolon)
+        .map(|(ident, ty)| Stat::TDecl(ident, ty))
+        .parse(input)
+}
+
+#[derive(Clone, Debug)]
+pub enum Pattern {
+    Tuple(Vec<Pattern>),
+    Product(Vec<(String, Pattern)>),
+    Variant(String, Box<Pattern>),
+    Variable(String),
+    Int(String),
+}
+
+fn pattern(input: Ctx) -> Parsed<Ctx, Pattern> {
+    (int.map(Pattern::Int))
+        .or(delimited(
+            Token::LeftRound,
+            separated_list0(pattern, Token::Comma),
+            Token::RightRound,
+        )
+        .map(Pattern::Tuple))
+        .or(delimited(
+            Token::LeftCurly,
+            separated_list0(ident.and(pattern), Token::Comma),
+            Token::RightCurly,
+        )
+        .map(Pattern::Product))
+        .or(ident
+            .and(delimited(Token::LeftSquare, pattern, Token::RightSquare))
+            .map(|(ident, pattern)| Pattern::Variant(ident, Box::new(pattern))))
+        .or(ident.map(Pattern::Variable))
+        .parse(input)
+}
+
+#[derive(Clone, Debug)]
+pub enum Expr {
+    Int(String),
+    Identifier(String),
+    Access(Box<Expr>, String),
+    Lambda(Pattern, Box<Expr>),
+    Block(Vec<Stat>, Option<Box<Expr>>),
+    Tuple(Vec<Expr>),
+    Product(Vec<(String, Expr)>),
+    Variant(String, Box<Expr>),
+    Call(String, Box<Expr>),
+    Match(Box<Expr>, Vec<(Pattern, Expr)>),
+}
+
+fn block(input: Ctx) -> Parsed<Ctx, Expr> {
+    delimited(
+        Token::LeftCurly,
+        many0(stat).and(opt(expr)),
+        Token::RightCurly,
+    )
+    .map(|(stats, expr)| Expr::Block(stats, expr.map(Box::new)))
+    .parse(input)
+}
+
+fn lambda(input: Ctx) -> Parsed<Ctx, (Pattern, Expr)> {
+    pattern.silent_and(Token::Arrow).and(expr).parse(input)
+}
+
+fn pmatch(input: Ctx) -> Parsed<Ctx, Expr> {
+    keyword("match")
+        .and(expr)
+        .and(delimited(
+            Token::LeftCurly,
+            separated_list0(lambda, Token::Comma),
+            Token::RightCurly,
+        ))
+        .map(|((_, base), branches)| Expr::Match(Box::new(base), branches))
+        .parse(input)
+}
+
+fn part(input: Ctx) -> Parsed<Ctx, Expr> {
+    (lambda.map(|(arg, body)| Expr::Lambda(arg, Box::new(body))))
+        .or(int.map(Expr::Int))
+        .or(delimited(
+            Token::LeftRound,
+            separated_list0(expr, Token::Comma),
+            Token::RightRound,
+        )
+        .map(Expr::Tuple))
+        .or(delimited(
+            Token::LeftCurly,
+            separated_list0(ident.and(expr), Token::Comma),
+            Token::RightCurly,
+        )
+        .map(Expr::Product))
+        .or(ident
+            .and(delimited(Token::LeftSquare, expr, Token::RightSquare))
+            .map(|(ident, expr)| Expr::Variant(ident, Box::new(expr))))
+        .or(ident
+            .and(delimited(
+                Token::LeftRound,
+                (separated_list0(expr, Token::Comma).map(Expr::Tuple)).or(expr),
+                Token::RightRound,
+            ))
+            .map(|(ident, arg)| Expr::Call(ident, Box::new(arg))))
+        .or(pmatch)
+        .or(ident.map(Expr::Identifier))
+        .or(block)
+        .parse(input)
+}
+
+fn expr(input: Ctx) -> Parsed<Ctx, Expr> {
+    fn merge(base: Expr, suffix: Expr) -> Expr {
+        match suffix {
+            Expr::Int(index) => Expr::Access(Box::new(base), index.clone()),
+            Expr::Call(ident, box Expr::Tuple(args)) => Expr::Call(
+                ident.clone(),
+                Box::new(Expr::Tuple([base].into_iter().chain(args).collect())),
+            ),
+            Expr::Call(ident, arg) => Expr::Call(
+                ident.clone(),
+                Box::new(Expr::Tuple(vec![base, *arg.clone()])),
+            ),
+            _ => panic!("unallowed as suffixes"),
+        }
+    }
+
+    separated_list1(part, Token::Dot)
+        .map(|parts| parts[1..].iter().cloned().fold(parts[0].clone(), merge))
+        .parse(input)
+}
+
+#[derive(Clone, Debug)]
+pub enum Stat {
+    TDecl(String, Type),
+    VDecl(String, Type, Expr),
+    Expr(Expr),
+}
+
+fn stat(input: Ctx) -> Parsed<Ctx, Stat> {
+    tdecl
+        .or(vdecl)
+        .or(expr.silent_and(Token::Semicolon).map(Stat::Expr))
+        .parse(input)
+}
+
+fn vdecl(input: Ctx) -> Parsed<Ctx, Stat> {
+    ident
+        .silent_and(Token::Colon)
+        .and(ty)
+        .silent_and(Token::Equals)
+        .and(expr)
+        .silent_and(Token::Semicolon)
+        .map(|((ident, ty), expr)| Stat::VDecl(ident, ty, expr))
+        .parse(input)
+}
+
+pub fn parse(tokens: &[Token]) -> Option<Vec<Stat>> {
+    let ir = IR::new();
+    let input = Ctx { tokens };
+
+    many0(tdecl.or(vdecl)).parse(input).opt().1
 }

@@ -1,14 +1,17 @@
 Vec2 :: (u32, u32);
-
-add: (u32, u32) -> u32 = x -> x.0;
-add: (Vec2, Vec2) -> Vec2 = x -> (add((x.0.0, x.1.0)), add((x.0.1, x.1.1)));
-test: (Vec2, Vec2) -> u32 = x -> add((add((x.0, x.1)).0, add((x.0, x.1)).1));
-
-Option :: [Some u32 | None ()];
-
-some: u32 -> Option = x -> Some[x];
+Option :: [Some u32, None ()];
 
 unwrap: Option -> u32 = x -> match x {
+  (x, x) -> x,
     Some[x] -> x,
-    None[x] -> unreachable
+    None[()] -> unreachable
+};
+
+add: (u32, u32) -> u32 = (a, a) -> a;
+add: (Vec2, Vec2) -> Vec2 = (a, b) -> (a.0.add(b.0), a.1.add(b.1));
+
+
+map: (Option, u32 -> u32) -> Option = (x, f) -> match x {
+  Some[x] -> Some[f(x)],
+  None[()] -> None[()]
 };
