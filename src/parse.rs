@@ -1,13 +1,6 @@
-use std::{
-    convert::Infallible,
-    marker::PhantomData,
-    ops::{FromResidual, Try},
-};
+use std::marker::PhantomData;
 
-use crate::{
-    ir::{TypeId, IR},
-    lex::Token,
-};
+use crate::lex::Token;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Ctx<'a> {
@@ -322,20 +315,16 @@ impl<I, A, T: FnMut(I) -> Parsed<I, A>> Parser<I, A> for T {
 
 #[derive(Clone, Debug)]
 pub struct SumType {
-    variants: Vec<(String, Type)>,
+    pub variants: Vec<(String, Type)>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ProductType {
-    fields: Vec<(String, Type)>,
+    pub fields: Vec<(String, Type)>,
 }
 
 #[derive(Clone, Debug)]
-pub enum Type {
-    Sum(SumType),
-    Product(ProductType),
-    Function(Box<Type>, Box<Type>),
-    Alias(String),
+pub enum PrimtiveType {
     U8,
     U16,
     U32,
@@ -348,6 +337,15 @@ pub enum Type {
     ISize,
     F32,
     F64,
+}
+
+#[derive(Clone, Debug)]
+pub enum Type {
+    Sum(SumType),
+    Product(ProductType),
+    Function(Box<Type>, Box<Type>),
+    Alias(String),
+    Primitive(PrimtiveType),
 }
 
 fn keyword<'a>(text: &'a str) -> impl Parser<Ctx<'a>, ()> {
@@ -407,19 +405,19 @@ fn function_ty(input: Ctx) -> Parsed<Ctx, Type> {
 }
 
 fn primitive_ty(input: Ctx) -> Parsed<Ctx, Type> {
-    keyword("u8")
-        .map(|_| Type::U8)
-        .or(keyword("u16").map(|_| Type::U16))
-        .or(keyword("u32").map(|_| Type::U32))
-        .or(keyword("u64").map(|_| Type::U64))
-        .or(keyword("usize").map(|_| Type::USize))
-        .or(keyword("i8").map(|_| Type::I8))
-        .or(keyword("i16").map(|_| Type::I16))
-        .or(keyword("i32").map(|_| Type::I32))
-        .or(keyword("i64").map(|_| Type::I64))
-        .or(keyword("isize").map(|_| Type::ISize))
-        .or(keyword("f32").map(|_| Type::F32))
-        .or(keyword("f64").map(|_| Type::F64))
+    (keyword("u8").map(|_| PrimtiveType::U8))
+        .or(keyword("u16").map(|_| PrimtiveType::U16))
+        .or(keyword("u32").map(|_| PrimtiveType::U32))
+        .or(keyword("u64").map(|_| PrimtiveType::U64))
+        .or(keyword("usize").map(|_| PrimtiveType::USize))
+        .or(keyword("i8").map(|_| PrimtiveType::I8))
+        .or(keyword("i16").map(|_| PrimtiveType::I16))
+        .or(keyword("i32").map(|_| PrimtiveType::I32))
+        .or(keyword("i64").map(|_| PrimtiveType::I64))
+        .or(keyword("isize").map(|_| PrimtiveType::ISize))
+        .or(keyword("f32").map(|_| PrimtiveType::F32))
+        .or(keyword("f64").map(|_| PrimtiveType::F64))
+        .map(Type::Primitive)
         .parse(input)
 }
 
@@ -605,8 +603,6 @@ fn vdecl(input: Ctx) -> Parsed<Ctx, Stat> {
 }
 
 pub fn parse(tokens: &[Token]) -> Option<Vec<Stat>> {
-    let ir = IR::new();
     let input = Ctx { tokens };
-
     many0(tdecl.or(vdecl)).parse(input).opt().1
 }

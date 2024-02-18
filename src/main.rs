@@ -3,15 +3,18 @@
 
 use lex::tokenize;
 
-mod ir;
+mod ast;
+mod infer;
 mod lex;
 mod parse;
 
 fn main() {
     let file = String::from_utf8(std::fs::read("test.tea").unwrap()).unwrap();
     let tokens = tokenize(&file);
-    let mut ast = parse::parse(&tokens).unwrap();
-    println!("{:#?}", ast);
+    let tree = parse::parse(&tokens).unwrap();
+    let tree = ast::flatten(tree);
+    let subs = infer::infer(&tree);
+    println!("{:#?}", tree);
     //println!("{}", ir.display());
 
     /*
