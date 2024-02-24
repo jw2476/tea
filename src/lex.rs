@@ -13,6 +13,7 @@ pub enum Token {
     Arrow,
     WideArrow,
     Backslash,
+    Bang,
 
     LeftRound,
     RightRound,
@@ -37,6 +38,7 @@ pub fn tokenize(text: &str) -> Vec<Token> {
             break;
         };
         let token = match c {
+            '!' => Token::Bang,
             '*' => Token::Star,
             '_' => Token::Underscore,
             '=' => {

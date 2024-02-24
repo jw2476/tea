@@ -337,6 +337,7 @@ pub enum PrimtiveType {
     ISize,
     F32,
     F64,
+    Never,
 }
 
 #[derive(Clone, Debug)]
@@ -417,6 +418,7 @@ fn primitive_ty(input: Ctx) -> Parsed<Ctx, Type> {
         .or(keyword("isize").map(|_| PrimtiveType::ISize))
         .or(keyword("f32").map(|_| PrimtiveType::F32))
         .or(keyword("f64").map(|_| PrimtiveType::F64))
+        .or((Token::Bang).map(|_| PrimtiveType::Never))
         .map(Type::Primitive)
         .parse(input)
 }
@@ -497,6 +499,7 @@ pub enum Expr {
     Variant(String, Box<Expr>),
     Call(String, Box<Expr>),
     Match(Box<Expr>, Vec<(Pattern, Expr)>),
+    Unreachable,
 }
 
 fn block(input: Ctx) -> Parsed<Ctx, Expr> {
@@ -527,6 +530,7 @@ fn pmatch(input: Ctx) -> Parsed<Ctx, Expr> {
 
 fn part(input: Ctx) -> Parsed<Ctx, Expr> {
     (lambda.map(|(arg, body)| Expr::Lambda(arg, Box::new(body))))
+        .or(keyword("unreachable").map(|_| Expr::Unreachable))
         .or(int.map(Expr::Int))
         .or(delimited(
             Token::LeftRound,

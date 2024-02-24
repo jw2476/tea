@@ -13,7 +13,7 @@ fn main() {
     let tokens = tokenize(&file);
     let tree = parse::parse(&tokens).unwrap();
     let mut tree = ast::flatten(tree);
-    let subs = infer::infer(&mut tree);
+    let types = infer::infer(&mut tree);
     println!("{:#?}", tree);
     //println!("{}", ir.display());
 

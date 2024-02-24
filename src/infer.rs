@@ -33,14 +33,23 @@ pub fn get_ty(ast: &mut AST, expr: ExprId, types: &[Option<TypeId>], state: Infe
             .unwrap(),
         Expr::Access(base, accessor) => {
             let base_ty = get_ty(ast, base, types, state);
-            ast[base_ty]
-                .product()
-                .unwrap()
-                .fields
-                .iter()
-                .find(|(ident, ty)| *ident == accessor)
-                .unwrap()
-                .1
+            match &ast[base_ty].dealias(ast) {
+                Type::Product(ProductType { fields }) => {
+                    fields
+                        .iter()
+                        .find(|(ident, _)| *ident == accessor)
+                        .unwrap()
+                        .1
+                }
+                Type::Sum(SumType { variants }) => {
+                    variants
+                        .iter()
+                        .find(|(ident, _)| *ident == accessor)
+                        .unwrap()
+                        .1
+                }
+                _ => panic!("Trying to access a primitive type"),
+            }
         }
         Expr::Tuple(elements) => {
             let element_types = elements
@@ -67,6 +76,7 @@ pub fn get_ty(ast: &mut AST, expr: ExprId, types: &[Option<TypeId>], state: Infe
             }))
         }
         Expr::Arg => state.arg_ty.unwrap(),
+        Expr::Unreachable => ast.add_type(Type::Primitive(PrimtiveType::Never)),
         x => todo!("{:?}", x),
     }
 }
@@ -96,21 +106,21 @@ pub fn propagate(
         }
         Expr::Block(stats, expr) => {
             state = stats.iter().fold(state, |mut state, stat| {
-                match stat {
-                    Stat::VDecl(ident, ty, value) => {
-                        let ty = if let ty = Type::Infer(*value) {
-                            get_ty(ast, *value, types, state.clone())
-                        } else {
-                            *ty
-                        };
-                        propagate(ast, ty, *value, types, state.clone());
-                        state.decls.insert(*ident, ty);
-                    }
-                    _ => (),
+                if let Stat::VDecl(ident, ty, value) = stat {
+                    let ty = if let Type::Infer(_) = ast[*ty] {
+                        get_ty(ast, *value, types, state.clone())
+                    } else {
+                        *ty
+                    };
+                    propagate(ast, ty, *value, types, state.clone());
+                    state.decls.insert(*ident, ty);
                 };
                 state
             });
-            expr.map(|expr| propagate(ast, ty, expr, types, state));
+
+            if let Some(expr) = expr {
+                propagate(ast, ty, expr, types, state)
+            }
         }
         Expr::Tuple(elements) => match ast[ty].dealias(ast).clone() {
             Type::Product(ProductType { fields }) => fields
@@ -120,7 +130,7 @@ pub fn propagate(
                 .for_each(|(ty, element)| propagate(ast, *ty, element, types, state.clone())),
             _ => panic!("Tuple doesn't have tuple type"),
         },
-        Expr::Access(base, accessor) => {
+        Expr::Access(base, _) => {
             let base_ty = get_ty(ast, base, types, state.clone());
             propagate(ast, base_ty, base, types, state);
         }
@@ -138,8 +148,14 @@ pub fn propagate(
                 propagate(ast, *ty, *expr, types, state.clone());
             })
         }
-        Expr::Match(base, branches) => todo!(),
-        Expr::Identifier(_) | Expr::Int(_) | Expr::Arg => (),
+        Expr::Match(base, branches) => {
+            let base_ty = get_ty(ast, base, types, state.clone());
+            let branch_ty = ast.add_type(Type::Function(base_ty, ty));
+            branches
+                .into_iter()
+                .for_each(|branch| propagate(ast, branch_ty, branch, types, state.clone()));
+        }
+        Expr::Identifier(_) | Expr::Int(_) | Expr::Arg | Expr::Unreachable => (),
         Expr::Lambda(body, _) => {
             let (arg, ret) = ast[ty].function().unwrap();
             state.arg_ty = Some(arg);
@@ -182,11 +198,20 @@ pub fn infer(ast: &mut AST) -> Vec<TypeId> {
 
     println!(
         "{:#?}",
+        types.iter().map(|x| x.map(|x| &ast[x])).collect::<Vec<_>>()
+    );
+
+    println!(
+        "{:#?}",
         types
-            .into_iter()
-            .map(|ty| ast[ty.unwrap()].clone())
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.is_none())
+            .map(|(i, _)| &ast.exprs[i])
             .collect::<Vec<_>>()
     );
 
-    Vec::new()
+    println!("{:?}", ast.strings[11]);
+
+    types.into_iter().map(Option::unwrap).collect()
 }

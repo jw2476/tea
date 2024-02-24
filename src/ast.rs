@@ -70,6 +70,7 @@ pub enum Expr {
     Call(StringId, ExprId),
     Match(ExprId, Vec<ExprId>),
     Arg,
+    Unreachable,
 }
 
 #[derive(Clone, Debug)]
@@ -272,6 +273,7 @@ fn flatten_expr(ast: &mut AST, expr: parse::Expr) -> ExprId {
 
             Expr::Match(base, branches)
         }
+        parse::Expr::Unreachable => Expr::Unreachable,
     };
     ast.add_expr(expr)
 }
