@@ -323,7 +323,7 @@ pub struct ProductType {
     pub fields: Vec<(String, Type)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrimtiveType {
     U8,
     U16,

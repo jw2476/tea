@@ -12,8 +12,8 @@ fn main() {
     let file = String::from_utf8(std::fs::read("test.tea").unwrap()).unwrap();
     let tokens = tokenize(&file);
     let tree = parse::parse(&tokens).unwrap();
-    let tree = ast::flatten(tree);
-    let subs = infer::infer(&tree);
+    let mut tree = ast::flatten(tree);
+    let subs = infer::infer(&mut tree);
     println!("{:#?}", tree);
     //println!("{}", ir.display());
 

@@ -1,10 +1,4 @@
+add: (u32, u32) -> u32 = (a, b) -> a;
+
 Vec2 :: (u32, u32);
-Option :: [Some u32, None ()];
-
-add: (u32, u32) -> u32 = (a, a) -> a;
-add: (Vec2, Vec2) -> Vec2 = (a, b) -> (a.0.add(b.0), a.1.add(b.1));
-
-unwrap: Option -> u32 = x -> match x {
-  Some[x] -> x,
-  None[()] -> unreachable
-};
+add_vec2: (Vec2, Vec2) -> Vec2 = (lhs, rhs) -> (lhs.0.add(rhs.0), lhs.1.add(rhs.1));

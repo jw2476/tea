@@ -8,24 +8,53 @@ pub struct StringId(pub usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExprId(pub usize);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SumType {
-    variants: Vec<(StringId, TypeId)>,
+    pub variants: Vec<(StringId, TypeId)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProductType {
-    fields: Vec<(StringId, TypeId)>,
+    pub fields: Vec<(StringId, TypeId)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Sum(SumType),
     Product(ProductType),
     Function(TypeId, TypeId),
     Alias(StringId),
     Primitive(PrimtiveType),
-    Infer,
+    Infer(ExprId),
+}
+
+impl Type {
+    pub fn sum(&self) -> Option<&SumType> {
+        match self {
+            Self::Sum(x) => Some(x),
+            _ => None,
+        }
+    }
+
+    pub fn product(&self) -> Option<&ProductType> {
+        match self {
+            Self::Product(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn function(&self) -> Option<(TypeId, TypeId)> {
+        match self {
+            Self::Function(arg, ret) => Some((*arg, *ret)),
+            _ => None,
+        }
+    }
+
+    pub fn dealias<'a>(&'a self, ast: &'a AST) -> &'a Self {
+        match self {
+            Self::Alias(alias) => &ast[ast.decls.get(alias).unwrap().0],
+            x => x,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +97,7 @@ impl AST {
         Self::default()
     }
 
-    fn add_string(&mut self, x: String) -> StringId {
+    pub fn add_string(&mut self, x: String) -> StringId {
         match self.strings.iter().position(|s| &x == s) {
             Some(index) => StringId(index),
             None => {
@@ -78,12 +107,17 @@ impl AST {
         }
     }
 
-    fn add_type(&mut self, x: Type) -> TypeId {
-        self.types.push(x);
-        TypeId(self.types.len() - 1)
+    pub fn add_type(&mut self, x: Type) -> TypeId {
+        match self.types.iter().position(|s| &x == s) {
+            Some(index) => TypeId(index),
+            None => {
+                self.types.push(x);
+                TypeId(self.types.len() - 1)
+            }
+        }
     }
 
-    fn add_expr(&mut self, x: Expr) -> ExprId {
+    pub fn add_expr(&mut self, x: Expr) -> ExprId {
         self.exprs.push(x);
         ExprId(self.exprs.len() - 1)
     }
@@ -155,7 +189,7 @@ fn desugar_pattern(ast: &mut AST, pattern: Pattern, value: ExprId) -> (Vec<Stat>
         }
         Pattern::Variable(ident) => {
             let ident = ast.add_string(ident);
-            let ty = ast.add_type(Type::Infer);
+            let ty = ast.add_type(Type::Infer(value));
             (vec![Stat::VDecl(ident, ty, value)], vec![])
         }
         Pattern::Int(int) => todo!(),
