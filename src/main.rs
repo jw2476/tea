@@ -4,7 +4,8 @@
 use lex::tokenize;
 
 mod ast;
-mod infer;
+//mod egraph;
+//mod infer;
 mod lex;
 mod parse;
 
@@ -12,9 +13,9 @@ fn main() {
     let file = String::from_utf8(std::fs::read("test.tea").unwrap()).unwrap();
     let tokens = tokenize(&file);
     let tree = parse::parse(&tokens).unwrap();
-    let mut tree = ast::flatten(tree);
-    let types = infer::infer(&mut tree);
-    println!("{:#?}", tree);
+    let _ = ast::to_ast(tree);
+    //  let mut tree = ast::flatten(tree);
+    //let types = infer::infer(&mut tree);
     //println!("{}", ir.display());
 
     /*

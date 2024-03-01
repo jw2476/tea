@@ -1,349 +1,400 @@
-use crate::parse::{self, Pattern, PrimtiveType};
-use std::{collections::HashMap, ops::Index};
+use std::{collections::HashMap, hash::Hash, ops::Index};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+use crate::parse::{self, PrimitiveType, ProductType, Stat, SumType};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TypeId(pub usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StringId(pub usize);
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExprId(pub usize);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SumType {
-    pub variants: Vec<(StringId, TypeId)>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProductType {
-    pub fields: Vec<(StringId, TypeId)>,
-}
+pub struct TypeClassId(pub usize);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NodeId(pub usize);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
-    Sum(SumType),
-    Product(ProductType),
+    Resolved(TypeId),
+    Unresolved(TypeClassId, Vec<TypeId>),
+    Product(Vec<TypeId>),
+    Sum(Vec<TypeId>),
     Function(TypeId, TypeId),
-    Alias(StringId),
-    Primitive(PrimtiveType),
-    Infer(ExprId),
-}
-
-impl Type {
-    pub fn sum(&self) -> Option<&SumType> {
-        match self {
-            Self::Sum(x) => Some(x),
-            _ => None,
-        }
-    }
-
-    pub fn product(&self) -> Option<&ProductType> {
-        match self {
-            Self::Product(x) => Some(x),
-            _ => None,
-        }
-    }
-    pub fn function(&self) -> Option<(TypeId, TypeId)> {
-        match self {
-            Self::Function(arg, ret) => Some((*arg, *ret)),
-            _ => None,
-        }
-    }
-
-    pub fn dealias<'a>(&'a self, ast: &'a AST) -> &'a Self {
-        match self {
-            Self::Alias(alias) => &ast[ast.decls.get(alias).unwrap().0],
-            x => x,
-        }
-    }
+    Primitive(PrimitiveType),
+    Generic(usize),
+    Parsed {
+        ty: parse::Type,
+        generics: HashMap<String, TypeId>,
+    },
 }
 
 #[derive(Clone, Debug)]
-pub enum Expr {
-    Int(StringId),
-    Identifier(StringId),
-    Access(ExprId, StringId),
-    Lambda(ExprId, Vec<Cond>),
-    Block(Vec<Stat>, Option<ExprId>),
-    Tuple(Vec<ExprId>),
-    Product(Vec<(StringId, ExprId)>),
-    Variant(StringId, ExprId),
-    Call(StringId, ExprId),
-    Match(ExprId, Vec<ExprId>),
-    Arg,
-    Unreachable,
+pub enum Node {
+    Block,
+    Get(NodeId, usize),
+    Call(NodeId, NodeId),
+    Product(Vec<NodeId>),
+    Variant(usize, NodeId),
+    Unwrap(NodeId, usize),
 }
 
-#[derive(Clone, Debug)]
-pub enum Stat {
-    TDecl(StringId, TypeId),
-    VDecl(StringId, TypeId, ExprId),
-    Expr(ExprId),
+pub struct ScopedMap<K, V> {
+    maps: Vec<HashMap<K, V>>,
 }
 
-#[derive(Clone, Debug)]
-pub enum Cond {
-    Variant(ExprId, StringId),
+impl<K: Eq + Hash, V> ScopedMap<K, V> {
+    pub fn new() -> Self {
+        Self { maps: Vec::new() }
+    }
+
+    pub fn push(&mut self) {
+        self.maps.push(HashMap::new())
+    }
+
+    pub fn pop(&mut self) {
+        self.maps.pop();
+    }
+
+    pub fn insert(&mut self, key: K, value: V) {
+        self.maps.last_mut().unwrap().insert(key, value);
+    }
+
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.maps.iter().rev().find_map(|map| map.get(key))
+    }
 }
 
-#[derive(Default, Debug, Clone)]
-pub struct AST {
-    pub strings: Vec<String>,
-    pub types: Vec<Type>,
-    pub exprs: Vec<Expr>,
-    pub decls: HashMap<StringId, (TypeId, Option<ExprId>)>,
+#[derive(Clone, Debug, Default)]
+pub struct Ast {
+    types: Vec<Type>,
+    nodes: Vec<Node>,
+    next_generic: usize,
 }
 
-impl AST {
-    fn new() -> AST {
+impl Ast {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn add_string(&mut self, x: String) -> StringId {
-        match self.strings.iter().position(|s| &x == s) {
-            Some(index) => StringId(index),
-            None => {
-                self.strings.push(x);
-                StringId(self.strings.len() - 1)
-            }
-        }
-    }
-
-    pub fn add_type(&mut self, x: Type) -> TypeId {
-        match self.types.iter().position(|s| &x == s) {
+    pub fn add_type(&mut self, ty: Type) -> TypeId {
+        match self.types.iter().position(|t| t == &ty) {
             Some(index) => TypeId(index),
             None => {
-                self.types.push(x);
+                self.types.push(ty);
                 TypeId(self.types.len() - 1)
             }
         }
     }
 
-    pub fn add_expr(&mut self, x: Expr) -> ExprId {
-        self.exprs.push(x);
-        ExprId(self.exprs.len() - 1)
+    pub fn add_generic(&mut self) -> TypeId {
+        self.types.push(Type::Generic(self.next_generic));
+        self.next_generic += 1;
+        TypeId(self.types.len() - 1)
+    }
+
+    pub fn add_node(&mut self, node: Node) -> NodeId {
+        self.nodes.push(node);
+        NodeId(self.nodes.len() - 1)
     }
 }
 
-impl Index<StringId> for AST {
-    type Output = String;
-
-    fn index(&self, index: StringId) -> &Self::Output {
-        &self.strings[index.0]
-    }
-}
-
-impl Index<TypeId> for AST {
+impl Index<TypeId> for Ast {
     type Output = Type;
-
     fn index(&self, index: TypeId) -> &Self::Output {
         &self.types[index.0]
     }
 }
 
-impl Index<ExprId> for AST {
-    type Output = Expr;
-
-    fn index(&self, index: ExprId) -> &Self::Output {
-        &self.exprs[index.0]
+impl Index<NodeId> for Ast {
+    type Output = Node;
+    fn index(&self, index: NodeId) -> &Self::Output {
+        &self.nodes[index.0]
     }
 }
 
-fn desugar_pattern(ast: &mut AST, pattern: Pattern, value: ExprId) -> (Vec<Stat>, Vec<Cond>) {
-    match pattern {
-        Pattern::Tuple(patterns) => patterns
-            .into_iter()
-            .enumerate()
-            .map(|(index, pattern)| {
-                let index = ast.add_string(index.to_string());
-                let value = ast.add_expr(Expr::Access(value, index));
-                desugar_pattern(ast, pattern, value)
+#[derive(Clone, Debug, Default)]
+struct TypeClass {
+    class: Vec<(Vec<TypeId>, TypeId)>,
+}
+
+impl TypeClass {
+    pub fn push(&mut self, generics: Vec<TypeId>, ty: TypeId) {
+        self.class.push((generics, ty))
+    }
+
+    pub fn get(&self, ast: &Ast, usage: Vec<TypeId>, types: Option<&TypeMap>) -> Option<TypeId> {
+        self.class
+            .iter()
+            .filter(|(requirements, _)| requirements.len() == usage.len())
+            .inspect(|(requirements, _)| println!("{:#?}", requirements))
+            .map(|(requirements, x)| {
+                if let Some(types) = types {
+                    (
+                        requirements
+                            .iter()
+                            .map(|requirement| match ast[*requirement].clone() {
+                                Type::Unresolved(id, generics) => types.classes[id.0]
+                                    .get(
+                                        ast,
+                                        generics
+                                            .into_iter()
+                                            .map(|generic| resolve(ast, generic, types))
+                                            .collect(),
+                                        Some(types),
+                                    )
+                                    .unwrap(),
+                                x => *requirement,
+                            })
+                            .collect(),
+                        x,
+                    )
+                } else {
+                    (requirements.clone(), x)
+                }
             })
-            .fold(
-                (Vec::new(), Vec::new()),
-                |(mut stats_acc, mut conds_acc), (stats, conds)| {
-                    stats_acc.extend(stats);
-                    conds_acc.extend(conds);
-                    (stats_acc, conds_acc)
-                },
-            ),
-        Pattern::Product(patterns) => patterns
-            .into_iter()
-            .map(|(index, pattern)| {
-                let index = ast.add_string(index.to_string());
-                let value = ast.add_expr(Expr::Access(value, index));
-                desugar_pattern(ast, pattern, value)
+            .filter(|(requirements, _)| {
+                usage
+                    .iter()
+                    .zip(requirements)
+                    .all(|x| match (&ast[*x.0], &ast[*x.1]) {
+                        (Type::Unresolved(_, _), _) => panic!(),
+                        (_, Type::Unresolved(id, generics)) => panic!(),
+                        (_, Type::Generic(_)) => true,
+                        (a, b) if a == b => true,
+                        _ => false,
+                    })
             })
-            .fold(
-                (Vec::new(), Vec::new()),
-                |(mut stats_acc, mut conds_acc), (stats, conds)| {
-                    stats_acc.extend(stats);
-                    conds_acc.extend(conds);
-                    (stats_acc, conds_acc)
-                },
-            ),
-        Pattern::Variant(ident, pattern) => {
-            let ident = ast.add_string(ident);
-            let inner = ast.add_expr(Expr::Access(value, ident));
-            let (stats, mut conds) = desugar_pattern(ast, *pattern, inner);
-            conds.push(Cond::Variant(value, ident));
-            (stats, conds)
-        }
-        Pattern::Variable(ident) => {
-            let ident = ast.add_string(ident);
-            let ty = ast.add_type(Type::Infer(value));
-            (vec![Stat::VDecl(ident, ty, value)], vec![])
-        }
-        Pattern::Int(int) => todo!(),
+            .map(|(requirements, ty)| {
+                (
+                    ty,
+                    usage
+                        .iter()
+                        .zip(requirements)
+                        .filter(|(a, b)| *a == b)
+                        .count(),
+                )
+            })
+            .max_by_key(|(_, score)| *score)
+            .map(|(ty, _)| *ty)
     }
 }
 
-fn flatten_lambda(ast: &mut AST, pattern: parse::Pattern, body: parse::Expr) -> Expr {
-    let arg = ast.add_expr(Expr::Arg);
-    let pattern = desugar_pattern(ast, pattern, arg);
-    let body = match body {
-        parse::Expr::Block(stats, expr) => {
-            let expr = expr.map(|expr| flatten_expr(ast, *expr));
-            Expr::Block(
-                pattern
-                    .0
-                    .into_iter()
-                    .chain(stats.into_iter().map(|stat| flatten_stat(ast, stat)))
-                    .collect(),
-                expr,
-            )
-        }
-        expr => Expr::Block(pattern.0, Some(flatten_expr(ast, expr))),
-    };
-    Expr::Lambda(ast.add_expr(body), pattern.1)
+#[derive(Clone, Debug, Default)]
+struct TypeMap {
+    classes: Vec<TypeClass>,
+    map: HashMap<String, TypeClassId>,
 }
 
-fn flatten_expr(ast: &mut AST, expr: parse::Expr) -> ExprId {
-    let expr = match expr {
-        parse::Expr::Int(int) => Expr::Int(ast.add_string(int)),
-        parse::Expr::Identifier(ident) => Expr::Identifier(ast.add_string(ident)),
-        parse::Expr::Access(expr, accessor) => {
-            let expr = flatten_expr(ast, *expr);
-            let accessor = ast.add_string(accessor);
-            Expr::Access(expr, accessor)
+impl TypeMap {
+    pub fn insert(&mut self, label: String, generics: Vec<TypeId>, ty: TypeId) {
+        match self.map.get_mut(&label) {
+            Some(types) => self.classes[types.0].push(generics, ty),
+            None => {
+                self.classes.push(TypeClass {
+                    class: vec![(generics, ty)],
+                });
+                let tcid = TypeClassId(self.classes.len() - 1);
+                self.map.insert(label, tcid);
+            }
         }
-        parse::Expr::Lambda(pattern, body) => flatten_lambda(ast, pattern, *body),
-        parse::Expr::Call(ident, arg) => {
-            let ident = ast.add_string(ident);
-            let arg = flatten_expr(ast, *arg);
-            Expr::Call(ident, arg)
-        }
-        parse::Expr::Block(stats, expr) => {
-            let stats = stats
-                .into_iter()
-                .map(|stat| flatten_stat(ast, stat))
-                .collect();
-            let expr = expr.map(|expr| flatten_expr(ast, *expr));
-            Expr::Block(stats, expr)
-        }
-        parse::Expr::Tuple(exprs) => Expr::Tuple(
-            exprs
-                .into_iter()
-                .map(|expr| flatten_expr(ast, expr))
-                .collect(),
-        ),
-        parse::Expr::Product(fields) => Expr::Product(
-            fields
-                .into_iter()
-                .map(|(ident, expr)| {
-                    let ident = ast.add_string(ident);
-                    let expr = flatten_expr(ast, expr);
-                    (ident, expr)
-                })
-                .collect(),
-        ),
-        parse::Expr::Variant(ident, expr) => {
-            let ident = ast.add_string(ident);
-            let expr = flatten_expr(ast, *expr);
-            Expr::Variant(ident, expr)
-        }
-        parse::Expr::Match(base, branches) => {
-            let base = flatten_expr(ast, *base);
-            let branches = branches
-                .into_iter()
-                .map(|(pattern, body)| {
-                    let expr = flatten_lambda(ast, pattern, body);
-                    ast.add_expr(expr)
-                })
-                .collect();
+    }
 
-            Expr::Match(base, branches)
-        }
-        parse::Expr::Unreachable => Expr::Unreachable,
-    };
-    ast.add_expr(expr)
-}
-
-fn flatten_stat(ast: &mut AST, stat: parse::Stat) -> Stat {
-    match stat {
-        parse::Stat::TDecl(ident, ty) => {
-            let ident = ast.add_string(ident);
-            let ty = flatten_type(ast, ty);
-            Stat::TDecl(ident, ty)
-        }
-        parse::Stat::VDecl(ident, ty, value) => {
-            let ident = ast.add_string(ident);
-            let ty = flatten_type(ast, ty);
-            let value = flatten_expr(ast, value);
-            Stat::VDecl(ident, ty, value)
-        }
-        parse::Stat::Expr(expr) => {
-            let expr = flatten_expr(ast, expr);
-            Stat::Expr(expr)
+    pub fn get(
+        &self,
+        ast: &Ast,
+        label: &str,
+        usage: Vec<TypeId>,
+        types: Option<&TypeMap>,
+    ) -> Option<TypeId> {
+        match self.map.get(label) {
+            Some(tcid) => self.classes[tcid.0].get(ast, usage, types),
+            None => None,
         }
     }
 }
 
-fn flatten_type(ast: &mut AST, ty: parse::Type) -> TypeId {
-    let ty = match ty {
-        parse::Type::Sum(parse::SumType { variants }) => Type::Sum(SumType {
-            variants: variants
-                .into_iter()
-                .map(|(ident, ty)| {
-                    let ident = ast.add_string(ident);
-                    let ty = flatten_type(ast, ty);
-                    (ident, ty)
-                })
-                .collect(),
-        }),
-        parse::Type::Product(parse::ProductType { fields }) => Type::Product(ProductType {
-            fields: fields
-                .into_iter()
-                .map(|(ident, ty)| {
-                    let ident = ast.add_string(ident);
-                    let ty = flatten_type(ast, ty);
-                    (ident, ty)
-                })
-                .collect(),
-        }),
+fn add_type(
+    ast: &mut Ast,
+    ty: parse::Type,
+    types: &TypeMap,
+    labels: &mut HashMap<TypeId, Vec<String>>,
+    generics: &HashMap<String, TypeId>,
+) -> TypeId {
+    match ty {
+        parse::Type::Sum(SumType { variants }) => {
+            let inner = variants
+                .iter()
+                .map(|(_, ty)| add_type(ast, ty.clone(), types, labels, generics))
+                .collect();
+            let ty = ast.add_type(Type::Sum(inner));
+            labels.insert(ty, variants.into_iter().map(|(label, _)| label).collect());
+            ty
+        }
+        parse::Type::Product(ProductType { fields }) => {
+            let inner = fields
+                .iter()
+                .map(|(_, ty)| add_type(ast, ty.clone(), types, labels, generics))
+                .collect();
+            let ty = ast.add_type(Type::Product(inner));
+            labels.insert(ty, fields.into_iter().map(|(label, _)| label).collect());
+            ty
+        }
         parse::Type::Function(arg, ret) => {
-            let arg = flatten_type(ast, *arg);
-            let ret = flatten_type(ast, *ret);
-            Type::Function(arg, ret)
+            let arg = add_type(ast, *arg, types, labels, generics);
+            let ret = add_type(ast, *ret, types, labels, generics);
+            ast.add_type(Type::Function(arg, ret))
         }
-        parse::Type::Alias(ident) => Type::Alias(ast.add_string(ident.clone())),
-        parse::Type::Primitive(ty) => Type::Primitive(ty),
-    };
-    ast.add_type(ty)
+        parse::Type::Named(label, gs) => {
+            let generics = gs
+                .into_iter()
+                .map(|g| add_type(ast, g, types, labels, generics))
+                .collect();
+            let ty = Type::Resolved(
+                types
+                    .get(ast, &label, generics, Some(types))
+                    .unwrap_or_else(|| panic!("Could not resolve {label}")),
+            );
+            ast.add_type(ty)
+        }
+        parse::Type::Generic(label) => *generics
+            .get(&label)
+            .unwrap_or_else(|| panic!("Undeclared generic {label} used")),
+        parse::Type::Primitive(ty) => ast.add_type(Type::Primitive(ty)),
+    }
 }
 
-fn flatten_decl(ast: &mut AST, decl: parse::Stat) {
-    let decl = flatten_stat(ast, decl);
-    match decl {
-        Stat::TDecl(ident, ty) => ast.decls.insert(ident, (ty, None)),
-        Stat::VDecl(ident, ty, value) => ast.decls.insert(ident, (ty, Some(value))),
-        _ => panic!(),
-    };
+fn to_generic(
+    ast: &mut Ast,
+    ty: parse::Type,
+    types: &mut TypeMap,
+    generics: &mut HashMap<String, TypeId>,
+) -> TypeId {
+    match ty {
+        parse::Type::Generic(label) => {
+            let ty = ast.add_generic();
+            generics.insert(label, ty);
+            ty
+        }
+        parse::Type::Named(label, gs) => {
+            let generics = gs
+                .into_iter()
+                .map(|g| to_generic(ast, g, types, generics))
+                .collect();
+
+            let id = match types.map.get(&label) {
+                Some(id) => *id,
+                None => {
+                    types.classes.push(TypeClass::default());
+                    TypeClassId(types.classes.len() - 1)
+                }
+            };
+            ast.add_type(Type::Unresolved(id, generics))
+        }
+        parse::Type::Primitive(ty) => ast.add_type(Type::Primitive(ty)),
+        _ => todo!(),
+    }
 }
 
-pub fn flatten(decls: Vec<parse::Stat>) -> AST {
-    let mut ast = AST::new();
+fn resolve(ast: &Ast, generic: TypeId, types: &TypeMap) -> TypeId {
+    match ast[generic].clone() {
+        Type::Unresolved(class, generics) => types.classes[class.0]
+            .get(
+                ast,
+                generics
+                    .into_iter()
+                    .map(|generic| resolve(ast, generic, types))
+                    .collect(),
+                Some(types),
+            )
+            .unwrap(),
+        _ => generic,
+    }
+}
+
+pub fn to_ast(decls: Vec<Stat>) -> Ast {
+    let mut ast = Ast::default();
+    let mut types = TypeMap::default();
+
+    // Add decls without resolving
     decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Stat::TDecl(label, generics, ty) => Some((label, generics, ty)),
+            _ => None,
+        })
+        .for_each(|(label, generics, ty)| {
+            let mut generic_labels = HashMap::new();
+            let generics = generics
+                .iter()
+                .map(|generic| {
+                    to_generic(&mut ast, generic.clone(), &mut types, &mut generic_labels)
+                })
+                .collect();
+
+            types.insert(
+                label.clone(),
+                generics,
+                ast.add_type(Type::Parsed {
+                    ty: ty.clone(),
+                    generics: generic_labels,
+                }),
+            );
+        });
+
+    // Resolve
+    types.classes = types
+        .classes
+        .clone()
         .into_iter()
-        .for_each(|decl| flatten_decl(&mut ast, decl));
+        .map(|class| TypeClass {
+            class: class
+                .class
+                .into_iter()
+                .map(|(generics, ty)| {
+                    (
+                        generics
+                            .into_iter()
+                            .map(|generic| resolve(&ast, generic, &types))
+                            .collect(),
+                        ty,
+                    )
+                })
+                .collect(),
+        })
+        .collect();
+
+    // Replace placeholders
+    let mut labels = HashMap::new();
+    types.classes.iter().for_each(|class| {
+        class
+            .class
+            .iter()
+            .for_each(|(_, id)| match ast[*id].clone() {
+                Type::Parsed { ty, generics } => {
+                    ast.types[id.0] =
+                        Type::Resolved(add_type(&mut ast, ty, &types, &mut labels, &generics));
+                }
+                _ => panic!(),
+            })
+    });
+
+    // Make all resolve chains direct
+    loop {
+        let old = ast.types.clone();
+        ast.types = old
+            .clone()
+            .into_iter()
+            .map(|ty| match ty {
+                Type::Resolved(first) => match ast[first] {
+                    Type::Resolved(second) => Type::Resolved(second),
+                    _ => Type::Resolved(first),
+                },
+                x => x,
+            })
+            .collect();
+        if ast.types == old {
+            break;
+        }
+    }
+
+    println!("{:#?}", types);
+    println!("{:#?}", ast);
+
     ast
 }

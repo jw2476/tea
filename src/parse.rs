@@ -313,18 +313,18 @@ impl<I, A, T: FnMut(I) -> Parsed<I, A>> Parser<I, A> for T {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SumType {
     pub variants: Vec<(String, Type)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProductType {
     pub fields: Vec<(String, Type)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PrimtiveType {
+pub enum PrimitiveType {
     U8,
     U16,
     U32,
@@ -340,13 +340,14 @@ pub enum PrimtiveType {
     Never,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
     Sum(SumType),
     Product(ProductType),
     Function(Box<Type>, Box<Type>),
-    Alias(String),
-    Primitive(PrimtiveType),
+    Named(String, Vec<Type>),
+    Generic(String),
+    Primitive(PrimitiveType),
 }
 
 fn keyword<'a>(text: &'a str) -> impl Parser<Ctx<'a>, ()> {
@@ -406,19 +407,19 @@ fn function_ty(input: Ctx) -> Parsed<Ctx, Type> {
 }
 
 fn primitive_ty(input: Ctx) -> Parsed<Ctx, Type> {
-    (keyword("u8").map(|_| PrimtiveType::U8))
-        .or(keyword("u16").map(|_| PrimtiveType::U16))
-        .or(keyword("u32").map(|_| PrimtiveType::U32))
-        .or(keyword("u64").map(|_| PrimtiveType::U64))
-        .or(keyword("usize").map(|_| PrimtiveType::USize))
-        .or(keyword("i8").map(|_| PrimtiveType::I8))
-        .or(keyword("i16").map(|_| PrimtiveType::I16))
-        .or(keyword("i32").map(|_| PrimtiveType::I32))
-        .or(keyword("i64").map(|_| PrimtiveType::I64))
-        .or(keyword("isize").map(|_| PrimtiveType::ISize))
-        .or(keyword("f32").map(|_| PrimtiveType::F32))
-        .or(keyword("f64").map(|_| PrimtiveType::F64))
-        .or((Token::Bang).map(|_| PrimtiveType::Never))
+    (keyword("u8").map(|_| PrimitiveType::U8))
+        .or(keyword("u16").map(|_| PrimitiveType::U16))
+        .or(keyword("u32").map(|_| PrimitiveType::U32))
+        .or(keyword("u64").map(|_| PrimitiveType::U64))
+        .or(keyword("usize").map(|_| PrimitiveType::USize))
+        .or(keyword("i8").map(|_| PrimitiveType::I8))
+        .or(keyword("i16").map(|_| PrimitiveType::I16))
+        .or(keyword("i32").map(|_| PrimitiveType::I32))
+        .or(keyword("i64").map(|_| PrimitiveType::I64))
+        .or(keyword("isize").map(|_| PrimitiveType::ISize))
+        .or(keyword("f32").map(|_| PrimitiveType::F32))
+        .or(keyword("f64").map(|_| PrimitiveType::F64))
+        .or((Token::Bang).map(|_| PrimitiveType::Never))
         .map(Type::Primitive)
         .parse(input)
 }
@@ -436,7 +437,13 @@ fn ty_common(input: Ctx, arg: bool) -> Parsed<Ctx, Type> {
         .or(tuple_ty.or(product_ty).map(Type::Product))
         .or(sum_ty.map(Type::Sum))
         .or(primitive_ty)
-        .or(ident.map(Type::Alias))
+        .or(ident
+            .and(generics)
+            .map(|(ident, generics)| Type::Named(ident, generics)))
+        .or(Token::Tick
+            .and(ident)
+            .map(|(_, ident)| ident)
+            .map(Type::Generic))
         .parse(input)
 }
 
@@ -450,10 +457,11 @@ fn arg_ty(input: Ctx) -> Parsed<Ctx, Type> {
 
 fn tdecl(input: Ctx) -> Parsed<Ctx, Stat> {
     ident
+        .and(generics)
         .silent_and(Token::DoubleColon)
         .and(ty)
         .silent_and(Token::Semicolon)
-        .map(|(ident, ty)| Stat::TDecl(ident, ty))
+        .map(|((ident, generics), ty)| Stat::TDecl(ident, generics, ty))
         .parse(input)
 }
 
@@ -481,8 +489,17 @@ fn pattern(input: Ctx) -> Parsed<Ctx, Pattern> {
         )
         .map(Pattern::Product))
         .or(ident
-            .and(delimited(Token::LeftSquare, pattern, Token::RightSquare))
-            .map(|(ident, pattern)| Pattern::Variant(ident, Box::new(pattern))))
+            .and(delimited(
+                Token::LeftSquare,
+                opt(pattern),
+                Token::RightSquare,
+            ))
+            .map(|(ident, pattern)| {
+                Pattern::Variant(
+                    ident,
+                    Box::new(pattern.unwrap_or(Pattern::Tuple(Vec::new()))),
+                )
+            }))
         .or(ident.map(Pattern::Variable))
         .parse(input)
 }
@@ -583,9 +600,18 @@ fn expr(input: Ctx) -> Parsed<Ctx, Expr> {
 
 #[derive(Clone, Debug)]
 pub enum Stat {
-    TDecl(String, Type),
-    VDecl(String, Type, Expr),
+    TDecl(String, Vec<Type>, Type),
+    VDecl(String, Vec<Type>, Type, Expr),
     Expr(Expr),
+}
+fn generics(input: Ctx) -> Parsed<Ctx, Vec<Type>> {
+    opt(delimited(
+        Token::LeftAngle,
+        separated_list0(ty, Token::Comma),
+        Token::RightAngle,
+    ))
+    .map(Option::unwrap_or_default)
+    .parse(input)
 }
 
 fn stat(input: Ctx) -> Parsed<Ctx, Stat> {
@@ -597,12 +623,13 @@ fn stat(input: Ctx) -> Parsed<Ctx, Stat> {
 
 fn vdecl(input: Ctx) -> Parsed<Ctx, Stat> {
     ident
+        .and(generics)
         .silent_and(Token::Colon)
         .and(ty)
         .silent_and(Token::Equals)
         .and(expr)
         .silent_and(Token::Semicolon)
-        .map(|((ident, ty), expr)| Stat::VDecl(ident, ty, expr))
+        .map(|(((ident, generics), ty), expr)| Stat::VDecl(ident, generics, ty, expr))
         .parse(input)
 }
 
